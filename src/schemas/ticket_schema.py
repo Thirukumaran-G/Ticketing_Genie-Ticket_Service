@@ -1,0 +1,134 @@
+"""
+Ticket schemas — customer creation + customer view + agent/TL views.
+src/schemas/ticket_schema.py
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+from typing import Optional
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+# ── Customer — Create Ticket ──────────────────────────────────────────────────
+
+class TicketCreateRequest(BaseModel):
+    title:             str           = Field(..., min_length=5, max_length=500)
+    description:       str           = Field(..., min_length=10)
+    product_id:        uuid.UUID
+    customer_severity: str           = Field(
+        ...,
+        description="Customer-perceived severity: critical | high | medium | low",
+        pattern="^(critical|high|medium|low)$",
+    )
+    environment:       Optional[str] = Field(
+        None,
+        pattern="^(production|staging|development|other)$",
+    )
+    source:            Optional[str] = Field(default="web")
+
+
+class TicketCreateResponse(BaseModel):
+    ticket_id:     uuid.UUID
+    ticket_number: str
+    status:        str
+    message:       str = "Your ticket has been received. Our team will reach out shortly."
+
+
+# ── Customer — View My Tickets ────────────────────────────────────────────────
+
+class CustomerTicketListItem(BaseModel):
+    """Lightweight row returned in the customer's ticket list."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id:                uuid.UUID
+    ticket_number:     str
+    title:             Optional[str]
+    status:            str
+    customer_severity: Optional[str]   = Field(None, alias="customer_priority")
+    priority:          Optional[str]   # system-derived, shown so customer knows urgency
+    severity:          Optional[str]   # system-derived severity
+    product_id:        Optional[uuid.UUID]
+    environment:       Optional[str]
+    source:            Optional[str]
+    sla_response_due:  Optional[datetime]
+    sla_resolve_due:   Optional[datetime]
+    created_at:        datetime
+    resolved_at:       Optional[datetime]
+    closed_at:         Optional[datetime]
+
+
+class CustomerTicketDetailResponse(CustomerTicketListItem):
+    """Full detail view for a single customer ticket — includes AI draft hidden,
+    agent info omitted (agent identity not exposed to customer)."""
+    description:           Optional[str]
+    priority_overridden:   bool
+    # We expose override_reason so the customer understands the priority change
+    override_reason:       Optional[str]
+    tier_snapshot:         Optional[str]
+    first_response_at:     Optional[datetime]
+    reopen_count:          int
+    # SLA breach flags — customer sees whether SLAs were met
+    sla_breached_at:       Optional[datetime]
+    response_sla_breached_at: Optional[datetime]
+
+
+# ── Agent / TL — Ticket view ──────────────────────────────────────────────────
+
+class TicketQueueItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id:               uuid.UUID
+    ticket_number:    str
+    title:            Optional[str]
+    status:           str
+    severity:         Optional[str]
+    priority:         Optional[str]
+    product_id:       Optional[uuid.UUID]
+    team_id:          Optional[uuid.UUID]
+    assigned_to:      Optional[uuid.UUID]
+    tier_snapshot:    Optional[str]
+    sla_response_due: Optional[datetime]
+    sla_resolve_due:  Optional[datetime]
+    created_at:       datetime
+
+
+class TicketDetailResponse(TicketQueueItem):
+    description:              Optional[str]
+    customer_id:              uuid.UUID
+    company_id:               Optional[uuid.UUID]
+    source:                   Optional[str]
+    environment:              Optional[str]
+    customer_priority:        Optional[str]
+    priority_overridden:      bool
+    override_reason:          Optional[str]
+    ai_draft:                 Optional[str]
+    first_response_at:        Optional[datetime]
+    sla_breached_at:          Optional[datetime]
+    response_sla_breached_at: Optional[datetime]
+    reopen_count:             int
+    resolved_at:              Optional[datetime]
+    closed_at:                Optional[datetime]
+
+
+# ── Notification ──────────────────────────────────────────────────────────────
+
+class NotificationResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id:          uuid.UUID
+    type:        Optional[str]
+    title:       Optional[str]
+    message:     Optional[str]
+    ticket_id:   Optional[uuid.UUID]
+    is_read:     bool
+    is_internal: bool
+    created_at:  datetime
+    
+
+
+class StatusUpdateRequest(BaseModel):
+    status: str
+    reason: Optional[str] = None
