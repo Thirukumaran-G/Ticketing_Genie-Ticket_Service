@@ -1,21 +1,12 @@
-"""
-ticket-service: src/data/repositories/admin_repository.py
-Full replacement file.
-
-Key changes vs original:
-  - Removed get_rule_by_tier_name()        (imported Tier from wrong service)
-  - Removed get_by_severity_and_tier_name() (imported Tier from wrong service)
-  - Added    get_rule() alias on SLARuleRepository (sla_worker called this name)
-  Workers now resolve tier_name → tier_id via HTTP (celery/utils.fetch_tier_id)
-  before calling the existing get_by_tier_and_priority / get_by_severity_and_tier.
-"""
-
 from __future__ import annotations
 
 import uuid
-from typing import Optional
+from typing import Optional, List
 
+from sqlalchemy import Table, Column, String, MetaData
 from sqlalchemy import select, update
+from sqlalchemy import select as sa_select
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.data.models.postgres.models import (
@@ -24,6 +15,16 @@ from src.data.models.postgres.models import (
     ProductConfig,
     SeverityPriorityMap,
     SLARule,
+    Team,
+    TeamMember,
+)
+
+# ── auth.tier reflection — same DB, different schema ─────────────────────────
+_auth_tier = Table(
+    "tier",
+    MetaData(schema="auth"),
+    Column("id",   PG_UUID(as_uuid=True)),
+    Column("name", String),
 )
 
 
@@ -34,9 +35,9 @@ class EmailConfigRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def list_all(self) -> list[EmailConfig]:
+    async def list_all(self) -> List[EmailConfig]:
         result = await self._session.execute(
-            select(EmailConfig).where(EmailConfig.is_active.is_(True))
+            select(EmailConfig).where(EmailConfig.is_active == True).order_by(EmailConfig.key)
         )
         return list(result.scalars().all())
 
@@ -53,15 +54,16 @@ class EmailConfigRepository:
         if existing:
             existing.value      = value
             existing.is_secret  = is_secret
+            existing.is_active  = True
             existing.updated_by = uuid.UUID(updated_by)
             await self._session.flush()
             await self._session.refresh(existing)
             return existing
-
         config = EmailConfig(
             key=key,
             value=value,
             is_secret=is_secret,
+            is_active=True,
             updated_by=uuid.UUID(updated_by),
         )
         self._session.add(config)
@@ -77,36 +79,27 @@ class SLARuleRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def list_active(self) -> list[SLARule]:
+    async def list_active(self) -> List[SLARule]:
         result = await self._session.execute(
-            select(SLARule).where(SLARule.is_active.is_(True))
+            select(SLARule)
+            .where(SLARule.is_active == True)
+            .order_by(SLARule.priority)
         )
         return list(result.scalars().all())
-
-    async def get_by_tier_and_priority(
-        self, tier_id: str, priority: str
-    ) -> Optional[SLARule]:
-        """Primary lookup — called after tier_id is resolved via HTTP."""
-        result = await self._session.execute(
-            select(SLARule).where(
-                SLARule.tier_id == uuid.UUID(tier_id),
-                SLARule.priority == priority,
-                SLARule.is_active.is_(True),
-            )
-        )
-        return result.scalar_one_or_none()
-
-    async def get_rule(self, tier_id: str, priority: str) -> Optional[SLARule]:
-        """
-        Alias for get_by_tier_and_priority.
-        sla_worker calls this name — keeping both so either works.
-        NOTE: tier_id must already be a resolved UUID string, not a tier name.
-        """
-        return await self.get_by_tier_and_priority(tier_id, priority)
 
     async def get_by_id(self, rule_id: str) -> Optional[SLARule]:
         result = await self._session.execute(
             select(SLARule).where(SLARule.id == uuid.UUID(rule_id))
+        )
+        return result.scalar_one_or_none()
+
+    async def get_by_tier_and_priority(self, tier_id: str, priority: str) -> Optional[SLARule]:
+        tier_uuid = uuid.UUID(str(tier_id))
+        result = await self._session.execute(
+            select(SLARule).where(
+                SLARule.tier_id  == tier_uuid,
+                SLARule.priority == priority,
+            )
         )
         return result.scalar_one_or_none()
 
@@ -126,21 +119,11 @@ class SeverityPriorityMapRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def list_all(self) -> list[SeverityPriorityMap]:
-        result = await self._session.execute(select(SeverityPriorityMap))
-        return list(result.scalars().all())
-
-    async def get_by_severity_and_tier(
-        self, severity: str, tier_id: str
-    ) -> Optional[SeverityPriorityMap]:
-        """Primary lookup — called after tier_id is resolved via HTTP."""
+    async def list_all(self) -> List[SeverityPriorityMap]:
         result = await self._session.execute(
-            select(SeverityPriorityMap).where(
-                SeverityPriorityMap.severity == severity,
-                SeverityPriorityMap.tier_id == uuid.UUID(tier_id),
-            )
+            select(SeverityPriorityMap).order_by(SeverityPriorityMap.severity)
         )
-        return result.scalar_one_or_none()
+        return list(result.scalars().all())
 
     async def get_by_id(self, map_id: str) -> Optional[SeverityPriorityMap]:
         result = await self._session.execute(
@@ -150,10 +133,20 @@ class SeverityPriorityMapRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_by_severity_and_tier(self, severity: str, tier_id: str) -> Optional[SeverityPriorityMap]:
+        tier_uuid = uuid.UUID(str(tier_id))
+        result = await self._session.execute(
+            select(SeverityPriorityMap).where(
+                SeverityPriorityMap.severity == severity,
+                SeverityPriorityMap.tier_id  == tier_uuid,
+            )
+        )
+        return result.scalar_one_or_none()
+
     async def delete(self, map_id: str) -> None:
-        obj = await self.get_by_id(map_id)
-        if obj:
-            await self._session.delete(obj)
+        mapping = await self.get_by_id(map_id)
+        if mapping:
+            await self._session.delete(mapping)
             await self._session.flush()
 
 
@@ -164,21 +157,23 @@ class KeywordRuleRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def list_active(self) -> list[KeywordRule]:
+    async def list_active(self) -> List[KeywordRule]:
         result = await self._session.execute(
-            select(KeywordRule).where(KeywordRule.is_active.is_(True))
+            select(KeywordRule)
+            .where(KeywordRule.is_active == True)
+            .order_by(KeywordRule.keyword)
         )
         return list(result.scalars().all())
-
-    async def get_by_keyword(self, keyword: str) -> Optional[KeywordRule]:
-        result = await self._session.execute(
-            select(KeywordRule).where(KeywordRule.keyword == keyword)
-        )
-        return result.scalar_one_or_none()
 
     async def get_by_id(self, rule_id: str) -> Optional[KeywordRule]:
         result = await self._session.execute(
             select(KeywordRule).where(KeywordRule.id == uuid.UUID(rule_id))
+        )
+        return result.scalar_one_or_none()
+
+    async def get_by_keyword(self, keyword: str) -> Optional[KeywordRule]:
+        result = await self._session.execute(
+            select(KeywordRule).where(KeywordRule.keyword == keyword)
         )
         return result.scalar_one_or_none()
 
@@ -198,9 +193,9 @@ class ProductConfigRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def list_active(self) -> list[ProductConfig]:
+    async def list_active(self) -> List[ProductConfig]:
         result = await self._session.execute(
-            select(ProductConfig).where(ProductConfig.is_active.is_(True))
+            select(ProductConfig).where(ProductConfig.is_active == True)
         )
         return list(result.scalars().all())
 
@@ -219,3 +214,86 @@ class ProductConfigRepository:
             .values(is_active=False)
         )
         await self._session.flush()
+
+
+# ── Team ──────────────────────────────────────────────────────────────────────
+
+class TeamRepository:
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def list_active(self) -> List[Team]:
+        result = await self._session.execute(
+            select(Team).where(Team.is_active == True).order_by(Team.name)
+        )
+        return list(result.scalars().all())
+
+    async def get_by_id(self, team_id: str) -> Optional[Team]:
+        result = await self._session.execute(
+            select(Team).where(Team.id == uuid.UUID(team_id))
+        )
+        return result.scalar_one_or_none()
+
+    async def list_by_product(self, product_id: str) -> List[Team]:
+        result = await self._session.execute(
+            select(Team).where(
+                Team.product_id == uuid.UUID(product_id),
+                Team.is_active  == True,
+            )
+        )
+        return list(result.scalars().all())
+
+    async def deactivate(self, team_id: str) -> None:
+        await self._session.execute(
+            update(Team)
+            .where(Team.id == uuid.UUID(team_id))
+            .values(is_active=False)
+        )
+        await self._session.flush()
+
+
+# ── Team Member ───────────────────────────────────────────────────────────────
+
+class TeamMemberRepository:
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def get_by_id(self, member_id: str) -> Optional[TeamMember]:
+        result = await self._session.execute(
+            select(TeamMember).where(TeamMember.id == uuid.UUID(member_id))
+        )
+        return result.scalar_one_or_none()
+
+    async def deactivate(self, member_id: str) -> None:
+        await self._session.execute(
+            update(TeamMember)
+            .where(TeamMember.id == uuid.UUID(member_id))
+            .values(is_active=False)
+        )
+        await self._session.flush()
+
+
+# ── Tier Repository — queries auth.tier directly (same DB, auth schema) ───────
+
+class TierRepository:
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def get_id_by_name(self, tier_name: str) -> str | None:
+        """
+        Returns tier UUID as plain str.
+        Queries auth.tier via reflected table — no ORM model import needed.
+        Returns None if tier_name not found.
+        """
+        from sqlalchemy import func
+
+        result = await self._session.execute(
+            sa_select(_auth_tier.c.id).where(
+                func.lower(_auth_tier.c.name) == tier_name.lower().strip()
+            )
+        )
+        row = result.scalar_one_or_none()
+        return str(row) if row is not None else None
