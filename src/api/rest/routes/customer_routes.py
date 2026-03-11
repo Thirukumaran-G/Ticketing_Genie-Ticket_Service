@@ -1,13 +1,3 @@
-"""
-Customer-facing routes — ticket creation + self-service ticket views.
-src/api/rest/routes/customer_routes.py
-
-Endpoints:
-  POST   /customer/tickets                   → create ticket (201, async background)
-  GET    /customer/tickets                   → list my tickets (paginated)
-  GET    /customer/tickets/{ticket_id}       → get single ticket detail
-"""
-
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
@@ -54,11 +44,15 @@ async def create_ticket(
     actor: CurrentActor = _CustomerActor,
     service: TicketService = Depends(_ticket_svc),
 ) -> TicketCreateResponse:
+    # Derive tier_snapshot from the JWT product_tiers for the selected product.
+    # No fallback — if product not in JWT tiers, tier_snapshot is None.
+    tier_snapshot = actor.get_tier_name_for_product(str(payload.product_id))
+
     ticket = await service.create_ticket(
         payload=payload,
         customer_id=actor.actor_id,
-        company_id=actor.customer_id, 
-        tier_snapshot=actor.customer_tier, 
+        company_id=actor.company_id,        # from JWT company_id claim directly
+        tier_snapshot=tier_snapshot,         # actual tier for this product, never "starter"
         customer_email=actor.email,
     )
     return TicketCreateResponse(

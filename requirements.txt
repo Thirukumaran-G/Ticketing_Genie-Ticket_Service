@@ -27,3 +27,4 @@ uuid6
 pgvector
 sentence_transformers
 pydantic[email]
+python-jose

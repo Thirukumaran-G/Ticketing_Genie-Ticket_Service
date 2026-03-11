@@ -219,3 +219,114 @@ class AgentService:
         except Exception as exc:
             logger.error("get_customer_info_failed", customer_id=customer_id, error=str(exc))
             return None
+    
+    async def unassign_ticket(
+        self,
+        agent_id: str,
+        ticket_id: str,
+        justification: str,
+    ) -> Ticket:
+        """
+        Agent self-unassigns a ticket with a mandatory justification.
+
+        Side effects:
+          - ticket.assigned_to set to NULL, status reset to 'new'
+          - SSE push to the team lead queue so TL sees it immediately
+          - Internal note saved to conversation with the justification
+        """
+        ticket = await self.get_ticket_by_id(agent_id, ticket_id)
+
+        await self._repo.unassign_ticket(ticket_id)
+
+        # Save justification as an internal conversation note
+        try:
+            from src.data.models.postgres.models import Conversation
+            note = Conversation(
+                ticket_id=ticket.id,
+                author_id=uuid.UUID(agent_id),
+                author_type="agent",
+                content=f"[Unassigned] {justification}",
+                is_internal=True,
+            )
+            self._session.add(note)
+        except Exception as exc:
+            logger.warning(
+                "unassign_internal_note_failed",
+                ticket_id=ticket_id,
+                agent_id=agent_id,
+                error=str(exc),
+            )
+
+        await self._session.commit()
+
+        # Reload fresh state
+        ticket = await self._repo.get_by_id(ticket_id)
+
+        logger.info(
+            "ticket_unassigned_by_agent",
+            ticket_id=ticket_id,
+            agent_id=agent_id,
+            justification=justification,
+        )
+
+        # Push SSE to team lead so unassigned queue updates in real-time
+        self._push_unassign_sse_to_team(ticket, agent_id, justification)
+
+        return ticket
+
+    def _push_unassign_sse_to_team(
+        self,
+        ticket: "Ticket",
+        agent_id: str,
+        justification: str,
+    ) -> None:
+        """Fire queue_update SSE event to the team lead of this ticket's team."""
+        try:
+            from src.config.settings import settings
+            from src.core.sse.redis_subscriber import publish_queue_update
+            from src.data.models.postgres.models import Team
+
+            # We need the team_lead_id — do a quick sync lookup via the session
+            # This is fire-and-forget so failure is only logged
+            if not ticket.team_id:
+                return
+
+            from src.core.sse.sse_manager import sse_manager
+            import asyncio
+
+            async def _push():
+                from sqlalchemy import select
+                from src.data.models.postgres.models import Team
+                r = await self._session.execute(
+                    select(Team).where(Team.id == ticket.team_id)
+                )
+                team = r.scalar_one_or_none()
+                if not team or not team.team_lead_id:
+                    return
+                await sse_manager.publish(
+                    str(team.team_lead_id),
+                    {
+                        "event": "queue_update",
+                        "data": {
+                            "ticket_id":     str(ticket.id),
+                            "ticket_number": ticket.ticket_number,
+                            "title":         ticket.title or "",
+                            "priority":      ticket.priority or "",
+                            "severity":      ticket.severity or "",
+                            "status":        ticket.status,
+                            "reason":        "agent_unassigned",
+                            "justification": justification,
+                            "unassigned_by": agent_id,
+                        },
+                    },
+                )
+
+            asyncio.create_task(_push())
+
+        except Exception as exc:
+            logger.warning(
+                "unassign_sse_push_failed",
+                ticket_id=str(ticket.id),
+                agent_id=agent_id,
+                error=str(exc),
+            )
