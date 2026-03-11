@@ -170,6 +170,22 @@ class TicketRepository:
         r = await self._s.execute(select(func.count()).select_from(Ticket))
         count = r.scalar() or 0
         return f"TKT-{count + 1:06d}"
+    
+    async def unassign_ticket(self, ticket_id: str) -> None:
+        """Clear assigned_to and reset status to new."""
+        await self._session.execute(
+            update(Ticket)
+            .where(Ticket.id == uuid.UUID(ticket_id))
+            .values(assigned_to=None, status="new")
+        )
+        await self._session.flush()
+
+    async def get_by_id(self, ticket_id: str) -> Optional[Ticket]:
+        """Fetch a ticket by ID only — no agent scope check."""
+        r = await self._session.execute(
+            select(Ticket).where(Ticket.id == uuid.UUID(ticket_id))
+        )
+        return r.scalar_one_or_none()
 
 
 class NotificationRepository:
