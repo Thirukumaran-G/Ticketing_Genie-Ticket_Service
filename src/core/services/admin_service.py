@@ -1,14 +1,3 @@
-"""
-AdminService — ticket-service admin configuration and reporting.
-
-HTTP client usage — ONLY where auth-service is the source of truth:
-  - list_tiers()                → GET /admin/tiers       (UI dropdown)
-  - list_products()             → GET /admin/products     (UI dropdown)
-  - report_tickets_by_product() → GET /admin/products     (enrich names)
-
-Everything else is pure local DB (ticket schema). No HTTP calls.
-"""
-
 from __future__ import annotations
 
 import uuid
@@ -19,12 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.exceptions.base import ConflictException, NotFoundException
 from src.core.services.audit_service import audit_service
 from src.data.models.postgres.models import (
-    EmailConfig,
-    KeywordRule,
-    ProductConfig,
-    SeverityPriorityMap,
-    SLARule,
-    Ticket,
+    EmailConfig, KeywordRule, ProductConfig,
+    SeverityPriorityMap, SLARule, Ticket,
 )
 from src.data.repositories.admin_repository import (
     EmailConfigRepository,
@@ -63,14 +48,12 @@ class AdminService:
     # ── Reference data (HTTP → auth-service) ─────────────────────────────────
 
     async def list_tiers(self, admin_token: str) -> list[dict]:
-        """Fetch tiers from auth-service — populates tier_id dropdowns in admin UI."""
         return await self._auth_client.get_tiers(admin_token)
 
     async def list_products(self, admin_token: str) -> list[dict]:
-        """Fetch products from auth-service — populates product_id dropdowns in admin UI."""
         return await self._auth_client.get_products(admin_token)
 
-    # ── Email Config (local DB) ───────────────────────────────────────────────
+    # ── Email Config ──────────────────────────────────────────────────────────
 
     async def list_email_config(self) -> list[EmailConfig]:
         configs = await self._email_repo.list_all()
@@ -87,28 +70,15 @@ class AdminService:
         results: list[EmailConfig] = []
         for item in payload:
             if item.key in _SYSTEM_ONLY_KEYS:
-                logger.warning(
-                    "admin_system_key_blocked",
-                    key=item.key,
-                    admin_id=admin_id,
-                )
+                logger.warning("admin_system_key_blocked", key=item.key)
                 continue
-            try:
-                config = await self._email_repo.upsert(
-                    key=item.key,
-                    value=item.value,
-                    is_secret=item.is_secret,
-                    updated_by=admin_id,
-                )
-                results.append(config)
-            except Exception as exc:
-                logger.error(
-                    "email_config_upsert_failed",
-                    key=item.key,
-                    admin_id=admin_id,
-                    error=str(exc),
-                )
-                raise
+            config = await self._email_repo.upsert(
+                key=item.key,
+                value=item.value,
+                is_secret=item.is_secret,
+                updated_by=admin_id,
+            )
+            results.append(config)
             await audit_service.log(
                 entity_type="email_config",
                 entity_id=config.id,
@@ -121,47 +91,27 @@ class AdminService:
         logger.info("email_config_upserted", count=len(results), admin_id=admin_id)
         return results
 
-    # ── SLA Rules (local DB) ──────────────────────────────────────────────────
+    # ── SLA Rules ─────────────────────────────────────────────────────────────
 
     async def list_sla_rules(self) -> list[SLARule]:
         return await self._sla_repo.list_active()
 
     async def upsert_sla_rule(
-        self,
-        payload: SLARuleCreateRequest,
-        admin_id: str,
+        self, payload: SLARuleCreateRequest, admin_id: str
     ) -> SLARule:
-        try:
-            existing = await self._sla_repo.get_by_tier_and_priority(
-                str(payload.tier_id), payload.priority
-            )
-        except Exception as exc:
-            logger.error(
-                "sla_rule_lookup_failed",
-                tier_id=str(payload.tier_id),
-                priority=payload.priority,
-                error=str(exc),
-            )
-            raise
-
+        existing = await self._sla_repo.get_by_tier_and_priority(
+            str(payload.tier_id), payload.priority
+        )
         if existing:
             old_value = {
-                "response_time_min":  existing.response_time_min,
+                "response_time_min":   existing.response_time_min,
                 "resolution_time_min": existing.resolution_time_min,
             }
             existing.response_time_min   = payload.response_time_min
             existing.resolution_time_min = payload.resolution_time_min
             existing.is_active           = True
-            try:
-                await self._session.flush()
-                await self._session.refresh(existing)
-            except Exception as exc:
-                logger.error(
-                    "sla_rule_update_flush_failed",
-                    rule_id=str(existing.id),
-                    error=str(exc),
-                )
-                raise
+            await self._session.flush()
+            await self._session.refresh(existing)
             await audit_service.log(
                 entity_type="sla_rule",
                 entity_id=existing.id,
@@ -170,41 +120,25 @@ class AdminService:
                 actor_type="user",
                 old_value=old_value,
                 new_value={
-                    "response_time_min":  payload.response_time_min,
+                    "response_time_min":   payload.response_time_min,
                     "resolution_time_min": payload.resolution_time_min,
                 },
                 changed_fields=["response_time_min", "resolution_time_min"],
             )
             await self._session.commit()
-            logger.info(
-                "sla_rule_updated",
-                rule_id=str(existing.id),
-                tier_id=str(payload.tier_id),
-                priority=payload.priority,
-                admin_id=admin_id,
-            )
+            logger.info("sla_rule_updated", rule_id=str(existing.id))
             return existing
 
-        try:
-            rule = SLARule(
-                tier_id=payload.tier_id,
-                priority=payload.priority,
-                response_time_min=payload.response_time_min,
-                resolution_time_min=payload.resolution_time_min,
-                created_by=uuid.UUID(admin_id),
-            )
-            self._session.add(rule)
-            await self._session.flush()
-            await self._session.refresh(rule)
-        except Exception as exc:
-            logger.error(
-                "sla_rule_create_failed",
-                tier_id=str(payload.tier_id),
-                priority=payload.priority,
-                error=str(exc),
-            )
-            raise
-
+        rule = SLARule(
+            tier_id=payload.tier_id,
+            priority=payload.priority,
+            response_time_min=payload.response_time_min,
+            resolution_time_min=payload.resolution_time_min,
+            created_by=uuid.UUID(admin_id),
+        )
+        self._session.add(rule)
+        await self._session.flush()
+        await self._session.refresh(rule)
         await audit_service.log(
             entity_type="sla_rule",
             entity_id=rule.id,
@@ -212,36 +146,21 @@ class AdminService:
             actor_id=uuid.UUID(admin_id),
             actor_type="user",
             new_value={
-                "tier_id":            str(payload.tier_id),
-                "priority":           payload.priority,
-                "response_time_min":  payload.response_time_min,
+                "tier_id":             str(payload.tier_id),
+                "priority":            payload.priority,
+                "response_time_min":   payload.response_time_min,
                 "resolution_time_min": payload.resolution_time_min,
             },
         )
         await self._session.commit()
-        logger.info(
-            "sla_rule_created",
-            rule_id=str(rule.id),
-            tier_id=str(payload.tier_id),
-            priority=payload.priority,
-            admin_id=admin_id,
-        )
+        logger.info("sla_rule_created", rule_id=str(rule.id))
         return rule
 
     async def deactivate_sla_rule(self, rule_id: str, admin_id: str) -> None:
         rule = await self._sla_repo.get_by_id(rule_id)
         if not rule:
             raise NotFoundException(f"SLA rule {rule_id} not found.")
-        try:
-            await self._sla_repo.deactivate(rule_id)
-        except Exception as exc:
-            logger.error(
-                "sla_rule_deactivate_failed",
-                rule_id=rule_id,
-                admin_id=admin_id,
-                error=str(exc),
-            )
-            raise
+        await self._sla_repo.deactivate(rule_id)
         await audit_service.log(
             entity_type="sla_rule",
             entity_id=rule.id,
@@ -252,44 +171,24 @@ class AdminService:
             new_value={"is_active": False},
         )
         await self._session.commit()
-        logger.info("sla_rule_deactivated", rule_id=rule_id, admin_id=admin_id)
+        logger.info("sla_rule_deactivated", rule_id=rule_id)
 
-    # ── Severity Priority Map (local DB) ──────────────────────────────────────
+    # ── Severity Priority Map ─────────────────────────────────────────────────
 
     async def list_severity_priority_map(self) -> list[SeverityPriorityMap]:
         return await self._sev_repo.list_all()
 
     async def upsert_severity_priority_map(
-        self,
-        payload: SeverityPriorityMapCreateRequest,
-        admin_id: str,
+        self, payload: SeverityPriorityMapCreateRequest, admin_id: str
     ) -> SeverityPriorityMap:
-        try:
-            existing = await self._sev_repo.get_by_severity_and_tier(
-                payload.severity, str(payload.tier_id)
-            )
-        except Exception as exc:
-            logger.error(
-                "severity_map_lookup_failed",
-                severity=payload.severity,
-                tier_id=str(payload.tier_id),
-                error=str(exc),
-            )
-            raise
-
+        existing = await self._sev_repo.get_by_severity_and_tier(
+            payload.severity, str(payload.tier_id)
+        )
         if existing:
             old_priority              = existing.derived_priority
             existing.derived_priority = payload.derived_priority
-            try:
-                await self._session.flush()
-                await self._session.refresh(existing)
-            except Exception as exc:
-                logger.error(
-                    "severity_map_update_flush_failed",
-                    map_id=str(existing.id),
-                    error=str(exc),
-                )
-                raise
+            await self._session.flush()
+            await self._session.refresh(existing)
             await audit_service.log(
                 entity_type="severity_priority_map",
                 entity_id=existing.id,
@@ -301,31 +200,16 @@ class AdminService:
                 changed_fields=["derived_priority"],
             )
             await self._session.commit()
-            logger.info(
-                "severity_priority_map_updated",
-                map_id=str(existing.id),
-                severity=payload.severity,
-                admin_id=admin_id,
-            )
             return existing
 
-        try:
-            mapping = SeverityPriorityMap(
-                severity=payload.severity,
-                tier_id=payload.tier_id,
-                derived_priority=payload.derived_priority,
-            )
-            self._session.add(mapping)
-            await self._session.flush()
-            await self._session.refresh(mapping)
-        except Exception as exc:
-            logger.error(
-                "severity_map_create_failed",
-                severity=payload.severity,
-                error=str(exc),
-            )
-            raise
-
+        mapping = SeverityPriorityMap(
+            severity=payload.severity,
+            tier_id=payload.tier_id,
+            derived_priority=payload.derived_priority,
+        )
+        self._session.add(mapping)
+        await self._session.flush()
+        await self._session.refresh(mapping)
         await audit_service.log(
             entity_type="severity_priority_map",
             entity_id=mapping.id,
@@ -333,34 +217,21 @@ class AdminService:
             actor_id=uuid.UUID(admin_id),
             actor_type="user",
             new_value={
-                "severity":        payload.severity,
-                "tier_id":         str(payload.tier_id),
+                "severity":         payload.severity,
+                "tier_id":          str(payload.tier_id),
                 "derived_priority": payload.derived_priority,
             },
         )
         await self._session.commit()
-        logger.info(
-            "severity_priority_map_created",
-            map_id=str(mapping.id),
-            severity=payload.severity,
-            admin_id=admin_id,
-        )
         return mapping
 
-    async def delete_severity_priority_map(self, map_id: str, admin_id: str) -> None:
+    async def delete_severity_priority_map(
+        self, map_id: str, admin_id: str
+    ) -> None:
         mapping = await self._sev_repo.get_by_id(map_id)
         if not mapping:
             raise NotFoundException(f"Severity priority map {map_id} not found.")
-        try:
-            await self._sev_repo.delete(map_id)
-        except Exception as exc:
-            logger.error(
-                "severity_map_delete_failed",
-                map_id=map_id,
-                admin_id=admin_id,
-                error=str(exc),
-            )
-            raise
+        await self._sev_repo.delete(map_id)
         await audit_service.log(
             entity_type="severity_priority_map",
             entity_id=mapping.id,
@@ -368,46 +239,33 @@ class AdminService:
             actor_id=uuid.UUID(admin_id),
             actor_type="user",
             old_value={
-                "severity":        mapping.severity,
-                "tier_id":         str(mapping.tier_id),
+                "severity":         mapping.severity,
+                "tier_id":          str(mapping.tier_id),
                 "derived_priority": mapping.derived_priority,
             },
         )
         await self._session.commit()
-        logger.info("severity_priority_map_deleted", map_id=map_id, admin_id=admin_id)
+        logger.info("severity_priority_map_deleted", map_id=map_id)
 
-    # ── Keyword Rules (local DB) ──────────────────────────────────────────────
+    # ── Keyword Rules ─────────────────────────────────────────────────────────
 
     async def list_keyword_rules(self) -> list[KeywordRule]:
         return await self._kw_repo.list_active()
 
     async def create_keyword_rule(
-        self,
-        payload: KeywordRuleCreateRequest,
-        admin_id: str,
+        self, payload: KeywordRuleCreateRequest, admin_id: str
     ) -> KeywordRule:
         existing = await self._kw_repo.get_by_keyword(payload.keyword)
         if existing and existing.is_active:
             raise ConflictException(f"Keyword '{payload.keyword}' already exists.")
-
-        try:
-            rule = KeywordRule(
-                keyword=payload.keyword,
-                severity=payload.severity,
-                created_by=uuid.UUID(admin_id),
-            )
-            self._session.add(rule)
-            await self._session.flush()
-            await self._session.refresh(rule)
-        except Exception as exc:
-            logger.error(
-                "keyword_rule_create_failed",
-                keyword=payload.keyword,
-                admin_id=admin_id,
-                error=str(exc),
-            )
-            raise
-
+        rule = KeywordRule(
+            keyword=payload.keyword,
+            severity=payload.severity,
+            created_by=uuid.UUID(admin_id),
+        )
+        self._session.add(rule)
+        await self._session.flush()
+        await self._session.refresh(rule)
         await audit_service.log(
             entity_type="keyword_rule",
             entity_id=rule.id,
@@ -417,54 +275,32 @@ class AdminService:
             new_value={"keyword": payload.keyword, "severity": payload.severity},
         )
         await self._session.commit()
-        logger.info(
-            "keyword_rule_created",
-            rule_id=str(rule.id),
-            keyword=payload.keyword,
-            admin_id=admin_id,
-        )
+        logger.info("keyword_rule_created", rule_id=str(rule.id))
         return rule
 
     async def update_keyword_rule(
-        self,
-        rule_id: str,
-        payload: KeywordRuleUpdateRequest,
-        admin_id: str,
+        self, rule_id: str, payload: KeywordRuleUpdateRequest, admin_id: str
     ) -> KeywordRule:
         rule = await self._kw_repo.get_by_id(rule_id)
         if not rule:
             raise NotFoundException(f"Keyword rule {rule_id} not found.")
-
         changed_fields: list[str] = []
         old_value: dict = {}
-
         if payload.keyword is not None and payload.keyword != rule.keyword:
             old_value["keyword"] = rule.keyword
             rule.keyword = payload.keyword
             changed_fields.append("keyword")
-
         if payload.severity is not None and payload.severity != rule.severity:
             old_value["severity"] = rule.severity
             rule.severity = payload.severity
             changed_fields.append("severity")
-
         if payload.is_active is not None and payload.is_active != rule.is_active:
             old_value["is_active"] = rule.is_active
             rule.is_active = payload.is_active
             changed_fields.append("is_active")
-
         if changed_fields:
-            try:
-                await self._session.flush()
-                await self._session.refresh(rule)
-            except Exception as exc:
-                logger.error(
-                    "keyword_rule_update_failed",
-                    rule_id=rule_id,
-                    admin_id=admin_id,
-                    error=str(exc),
-                )
-                raise
+            await self._session.flush()
+            await self._session.refresh(rule)
             await audit_service.log(
                 entity_type="keyword_rule",
                 entity_id=rule.id,
@@ -476,31 +312,14 @@ class AdminService:
                 changed_fields=changed_fields,
             )
             await self._session.commit()
-            logger.info(
-                "keyword_rule_updated",
-                rule_id=rule_id,
-                fields=changed_fields,
-                admin_id=admin_id,
-            )
-        else:
-            logger.info("keyword_rule_no_changes", rule_id=rule_id, admin_id=admin_id)
-
+            logger.info("keyword_rule_updated", rule_id=rule_id, fields=changed_fields)
         return rule
 
     async def deactivate_keyword_rule(self, rule_id: str, admin_id: str) -> None:
         rule = await self._kw_repo.get_by_id(rule_id)
         if not rule:
             raise NotFoundException(f"Keyword rule {rule_id} not found.")
-        try:
-            await self._kw_repo.deactivate(rule_id)
-        except Exception as exc:
-            logger.error(
-                "keyword_rule_deactivate_failed",
-                rule_id=rule_id,
-                admin_id=admin_id,
-                error=str(exc),
-            )
-            raise
+        await self._kw_repo.deactivate(rule_id)
         await audit_service.log(
             entity_type="keyword_rule",
             entity_id=rule.id,
@@ -511,30 +330,17 @@ class AdminService:
             new_value={"is_active": False},
         )
         await self._session.commit()
-        logger.info("keyword_rule_deactivated", rule_id=rule_id, admin_id=admin_id)
+        logger.info("keyword_rule_deactivated", rule_id=rule_id)
 
-    # ── Product Config (local DB) ─────────────────────────────────────────────
+    # ── Product Config ────────────────────────────────────────────────────────
 
     async def list_product_configs(self) -> list[ProductConfig]:
         return await self._product_config_repo.list_active()
 
     async def upsert_product_config(
-        self,
-        product_id: str,
-        payload: ProductConfigUpsertRequest,
-        admin_id: str,
+        self, product_id: str, payload: ProductConfigUpsertRequest, admin_id: str
     ) -> ProductConfig:
-        try:
-            existing = await self._product_config_repo.get_by_product_id(product_id)
-        except Exception as exc:
-            logger.error(
-                "product_config_lookup_failed",
-                product_id=product_id,
-                admin_id=admin_id,
-                error=str(exc),
-            )
-            raise
-
+        existing = await self._product_config_repo.get_by_product_id(product_id)
         if existing:
             old_value = {
                 "min_severity":    existing.min_severity,
@@ -544,17 +350,8 @@ class AdminService:
             existing.default_escalate = payload.default_escalate
             existing.is_active        = True
             existing.updated_by       = uuid.UUID(admin_id)
-            try:
-                await self._session.flush()
-                await self._session.refresh(existing)
-            except Exception as exc:
-                logger.error(
-                    "product_config_update_failed",
-                    product_id=product_id,
-                    admin_id=admin_id,
-                    error=str(exc),
-                )
-                raise
+            await self._session.flush()
+            await self._session.refresh(existing)
             await audit_service.log(
                 entity_type="product_config",
                 entity_id=existing.id,
@@ -569,28 +366,17 @@ class AdminService:
                 changed_fields=["min_severity", "default_escalate"],
             )
             await self._session.commit()
-            logger.info("product_config_updated", product_id=product_id, admin_id=admin_id)
             return existing
 
-        try:
-            config = ProductConfig(
-                product_id=uuid.UUID(product_id),
-                min_severity=payload.min_severity,
-                default_escalate=payload.default_escalate,
-                updated_by=uuid.UUID(admin_id),
-            )
-            self._session.add(config)
-            await self._session.flush()
-            await self._session.refresh(config)
-        except Exception as exc:
-            logger.error(
-                "product_config_create_failed",
-                product_id=product_id,
-                admin_id=admin_id,
-                error=str(exc),
-            )
-            raise
-
+        config = ProductConfig(
+            product_id=uuid.UUID(product_id),
+            min_severity=payload.min_severity,
+            default_escalate=payload.default_escalate,
+            updated_by=uuid.UUID(admin_id),
+        )
+        self._session.add(config)
+        await self._session.flush()
+        await self._session.refresh(config)
         await audit_service.log(
             entity_type="product_config",
             entity_id=config.id,
@@ -604,28 +390,18 @@ class AdminService:
             },
         )
         await self._session.commit()
-        logger.info(
-            "product_config_created",
-            config_id=str(config.id),
-            product_id=product_id,
-            admin_id=admin_id,
-        )
+        logger.info("product_config_created", config_id=str(config.id))
         return config
 
-    async def deactivate_product_config(self, product_id: str, admin_id: str) -> None:
+    async def deactivate_product_config(
+        self, product_id: str, admin_id: str
+    ) -> None:
         existing = await self._product_config_repo.get_by_product_id(product_id)
         if not existing:
-            raise NotFoundException(f"ProductConfig for product {product_id} not found.")
-        try:
-            await self._product_config_repo.deactivate_by_product_id(product_id)
-        except Exception as exc:
-            logger.error(
-                "product_config_deactivate_failed",
-                product_id=product_id,
-                admin_id=admin_id,
-                error=str(exc),
+            raise NotFoundException(
+                f"ProductConfig for product {product_id} not found."
             )
-            raise
+        await self._product_config_repo.deactivate_by_product_id(product_id)
         await audit_service.log(
             entity_type="product_config",
             entity_id=existing.id,
@@ -636,23 +412,18 @@ class AdminService:
             new_value={"is_active": False},
         )
         await self._session.commit()
-        logger.info("product_config_deactivated", product_id=product_id, admin_id=admin_id)
+        logger.info("product_config_deactivated", product_id=product_id)
 
-    # ── Reports (local DB — no HTTP) ──────────────────────────────────────────
+    # ── Reports ───────────────────────────────────────────────────────────────
 
     async def report_open_tickets_by_priority(self) -> dict:
-        """Real-time open ticket counts grouped by priority — pure local DB."""
         open_statuses = ("new", "acknowledged", "in_progress", "on_hold", "reopened")
-        try:
-            result = await self._session.execute(
-                select(Ticket.priority, func.count(Ticket.id).label("count"))
-                .where(Ticket.status.in_(open_statuses))
-                .group_by(Ticket.priority)
-                .order_by(Ticket.priority)
-            )
-        except Exception as exc:
-            logger.error("report_open_tickets_by_priority_failed", error=str(exc))
-            raise
+        result = await self._session.execute(
+            select(Ticket.priority, func.count(Ticket.id).label("count"))
+            .where(Ticket.status.in_(open_statuses))
+            .group_by(Ticket.priority)
+            .order_by(Ticket.priority)
+        )
         return {
             "open_tickets_by_priority": [
                 {"priority": row.priority or "unset", "count": row.count}
@@ -661,20 +432,15 @@ class AdminService:
         }
 
     async def report_sla_breaches_by_day(self) -> dict:
-        """SLA breach counts grouped by day — pure local DB."""
-        try:
-            result = await self._session.execute(
-                select(
-                    cast(Ticket.sla_breached_at, Date).label("day"),
-                    func.count(Ticket.id).label("breach_count"),
-                )
-                .where(Ticket.sla_breached_at.isnot(None))
-                .group_by("day")
-                .order_by("day")
+        result = await self._session.execute(
+            select(
+                cast(Ticket.sla_breached_at, Date).label("day"),
+                func.count(Ticket.id).label("breach_count"),
             )
-        except Exception as exc:
-            logger.error("report_sla_breaches_by_day_failed", error=str(exc))
-            raise
+            .where(Ticket.sla_breached_at.isnot(None))
+            .group_by("day")
+            .order_by("day")
+        )
         return {
             "sla_breaches_by_day": [
                 {"day": str(row.day), "breach_count": row.breach_count}
@@ -683,70 +449,68 @@ class AdminService:
         }
 
     async def report_first_response_time(self) -> dict:
-        """Average and median first response time in minutes — pure local DB."""
-        try:
-            result = await self._session.execute(
-                select(
-                    func.avg(
-                        func.extract("epoch", Ticket.first_response_at - Ticket.created_at)
-                    ).label("avg_seconds"),
-                    func.percentile_cont(0.5)
-                    .within_group(
-                        func.extract("epoch", Ticket.first_response_at - Ticket.created_at)
+        result = await self._session.execute(
+            select(
+                func.avg(
+                    func.extract(
+                        "epoch", Ticket.first_response_at - Ticket.created_at
                     )
-                    .label("median_seconds"),
-                ).where(Ticket.first_response_at.isnot(None))
-            )
-            row = result.one()
-        except Exception as exc:
-            logger.error("report_first_response_time_failed", error=str(exc))
-            raise
+                ).label("avg_seconds"),
+                func.percentile_cont(0.5)
+                .within_group(
+                    func.extract(
+                        "epoch", Ticket.first_response_at - Ticket.created_at
+                    )
+                )
+                .label("median_seconds"),
+            ).where(Ticket.first_response_at.isnot(None))
+        )
+        row = result.one()
         return {
-            "average_first_response_time_min": round((row.avg_seconds or 0) / 60, 2),
-            "median_first_response_time_min":  round((row.median_seconds or 0) / 60, 2),
+            "average_first_response_time_min": round(
+                (row.avg_seconds or 0) / 60, 2
+            ),
+            "median_first_response_time_min": round(
+                (row.median_seconds or 0) / 60, 2
+            ),
         }
 
     async def report_tickets_by_product(self, admin_token: str) -> dict:
-        """Ticket stats grouped by product.
-
-        product_id → local DB. product name → single HTTP call to auth-service.
-        """
-        try:
-            result = await self._session.execute(
-                select(
-                    Ticket.product_id,
-                    func.count(Ticket.id).label("total"),
-                    func.count(Ticket.resolved_at).label("resolved"),
-                    func.avg(
-                        func.extract("epoch", Ticket.resolved_at - Ticket.created_at)
-                    ).label("avg_resolution_seconds"),
-                )
-                .where(Ticket.product_id.isnot(None))
-                .group_by(Ticket.product_id)
+        result = await self._session.execute(
+            select(
+                Ticket.product_id,
+                func.count(Ticket.id).label("total"),
+                func.count(Ticket.resolved_at).label("resolved"),
+                func.avg(
+                    func.extract(
+                        "epoch", Ticket.resolved_at - Ticket.created_at
+                    )
+                ).label("avg_resolution_seconds"),
             )
-            rows = result.all()
-        except Exception as exc:
-            logger.error("report_tickets_by_product_db_failed", error=str(exc))
-            raise
-
+            .where(Ticket.product_id.isnot(None))
+            .group_by(Ticket.product_id)
+        )
+        rows = result.all()
         try:
             products = await self._auth_client.get_products(admin_token)
-            product_name_map: dict[str, str] = {p["id"]: p["name"] for p in products}
+            product_name_map: dict[str, str] = {
+                p["id"]: p["name"] for p in products
+            }
         except Exception as exc:
-            logger.warning(
-                "report_tickets_by_product_http_failed",
-                error=str(exc),
-            )
+            logger.warning("report_tickets_by_product_http_failed", error=str(exc))
             product_name_map = {}
-
         return {
             "tickets_by_product": [
                 {
                     "product_id":              str(row.product_id),
-                    "product_name":            product_name_map.get(str(row.product_id), "unknown"),
+                    "product_name":            product_name_map.get(
+                        str(row.product_id), "unknown"
+                    ),
                     "total":                   row.total,
                     "resolved":                row.resolved,
-                    "avg_resolution_time_min": round((row.avg_resolution_seconds or 0) / 60, 2),
+                    "avg_resolution_time_min": round(
+                        (row.avg_resolution_seconds or 0) / 60, 2
+                    ),
                 }
                 for row in rows
             ]

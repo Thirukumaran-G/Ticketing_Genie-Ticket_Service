@@ -65,7 +65,6 @@ class EmailClient:
             f"Dear Customer,\n\n"
             f"Thank you for reaching out. We have received your support request.\n\n"
             f"Your ticket number is: {ticket_number}\n"
-            f"Track your ticket at: https://app.ticketinggenie.com/tickets/{ticket_id}\n\n"
             f"Our team will review your request and respond within the agreed SLA timeframe.\n\n"
             f"Best regards,\nTicketing Genie Support Team"
         )

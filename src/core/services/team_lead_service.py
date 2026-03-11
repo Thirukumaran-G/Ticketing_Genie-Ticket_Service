@@ -1,10 +1,6 @@
 """
 TeamLeadService — all actions a team lead can perform on tickets.
 src/core/services/team_lead_service.py
-
-Every mutation is audit-logged:
-  - manual_assign       → ticket_manually_assigned
-  - update_ticket_status → ticket_status_updated_by_tl
 """
 
 from __future__ import annotations
@@ -36,10 +32,13 @@ class TeamLeadService:
         self._repo       = TeamLeadRepository(session)
         self._notif_repo = NotificationRepository(session)
 
-    # ── Resolve TL's team ─────────────────────────────────────────────────────
+    # ── Resolve TL's teams ────────────────────────────────────────────────────
 
     async def _get_team_id(self, lead_user_id: str) -> str:
-        """Resolve team_id from the TL's user_id — raises 404 if not a lead."""
+        """
+        Returns first active team_id for this TL.
+        Used for single-ticket ops where ticket already has a team_id.
+        """
         try:
             team = await self._repo.get_team_by_lead(lead_user_id)
         except Exception as exc:
@@ -56,24 +55,43 @@ class TeamLeadService:
             )
         return str(team.id)
 
+    async def _get_all_team_ids(self, lead_user_id: str) -> list[str]:
+        """
+        Returns ALL active team_ids for this TL across all products.
+        Used for member/ticket/queue aggregation.
+        """
+        try:
+            ids = await self._repo.get_all_team_ids_by_lead(lead_user_id)
+        except Exception as exc:
+            logger.error(
+                "team_lead_all_teams_lookup_failed",
+                lead_user_id=lead_user_id,
+                error=str(exc),
+            )
+            raise
+        if not ids:
+            raise NotFoundException("No active teams found for this team lead.")
+        return [str(i) for i in ids]
+
     # ── Queue ─────────────────────────────────────────────────────────────────
 
     async def get_unassigned_queue(self, lead_user_id: str) -> list[Ticket]:
-        team_id = await self._get_team_id(lead_user_id)
+        """Unassigned tickets across all product teams."""
+        team_ids = await self._get_all_team_ids(lead_user_id)
         try:
-            tickets = await self._repo.get_unassigned_tickets(team_id)
+            tickets = await self._repo.get_unassigned_tickets_multi(team_ids)
         except Exception as exc:
             logger.error(
                 "tl_unassigned_queue_failed",
                 lead_user_id=lead_user_id,
-                team_id=team_id,
+                team_ids=team_ids,
                 error=str(exc),
             )
             raise
         logger.info(
             "tl_unassigned_queue_fetched",
             lead_user_id=lead_user_id,
-            team_id=team_id,
+            team_ids=team_ids,
             count=len(tickets),
         )
         return tickets
@@ -83,14 +101,15 @@ class TeamLeadService:
         lead_user_id: str,
         status: str | None = None,
     ) -> list[Ticket]:
-        team_id = await self._get_team_id(lead_user_id)
+        """All tickets across all product teams — TL sees all their members' tickets."""
+        team_ids = await self._get_all_team_ids(lead_user_id)
         try:
-            tickets = await self._repo.get_all_team_tickets(team_id, status=status)
+            tickets = await self._repo.get_all_team_tickets_multi(team_ids, status=status)
         except Exception as exc:
             logger.error(
                 "tl_all_tickets_failed",
                 lead_user_id=lead_user_id,
-                team_id=team_id,
+                team_ids=team_ids,
                 status=status,
                 error=str(exc),
             )
@@ -98,7 +117,7 @@ class TeamLeadService:
         logger.info(
             "tl_all_tickets_fetched",
             lead_user_id=lead_user_id,
-            team_id=team_id,
+            team_ids=team_ids,
             status=status,
             count=len(tickets),
         )
@@ -107,9 +126,12 @@ class TeamLeadService:
     # ── Single ticket ─────────────────────────────────────────────────────────
 
     async def get_ticket(self, ticket_id: str, lead_user_id: str) -> Ticket:
-        team_id = await self._get_team_id(lead_user_id)
+        """
+        Fetch single ticket — checks across all product teams this TL leads.
+        """
+        team_ids = await self._get_all_team_ids(lead_user_id)
         try:
-            ticket = await self._repo.get_ticket(ticket_id, team_id)
+            ticket = await self._repo.get_ticket_by_any_team(ticket_id, team_ids)
         except Exception as exc:
             logger.error(
                 "tl_get_ticket_failed",
@@ -130,8 +152,8 @@ class TeamLeadService:
         payload: ManualAssignRequest,
         lead_user_id: str,
     ) -> Ticket:
-        team_id = await self._get_team_id(lead_user_id)
-        ticket  = await self._repo.get_ticket(ticket_id, team_id)
+        team_ids = await self._get_all_team_ids(lead_user_id)
+        ticket   = await self._repo.get_ticket_by_any_team(ticket_id, team_ids)
         if not ticket:
             raise NotFoundException(f"Ticket {ticket_id} not found in your team.")
 
@@ -204,8 +226,8 @@ class TeamLeadService:
         payload: TicketStatusUpdateRequest,
         lead_user_id: str,
     ) -> Ticket:
-        team_id = await self._get_team_id(lead_user_id)
-        ticket  = await self._repo.get_ticket(ticket_id, team_id)
+        team_ids = await self._get_all_team_ids(lead_user_id)
+        ticket   = await self._repo.get_ticket_by_any_team(ticket_id, team_ids)
         if not ticket:
             raise NotFoundException(f"Ticket {ticket_id} not found in your team.")
 
@@ -248,8 +270,13 @@ class TeamLeadService:
     # ── Team overview ─────────────────────────────────────────────────────────
 
     async def get_team_overview(self, lead_user_id: str) -> TeamOverviewResponse:
+        """
+        Overview aggregated across all product teams.
+        Members are deduplicated by user_id — same agent appears once.
+        """
         try:
-            team = await self._repo.get_team_by_lead(lead_user_id)
+            team     = await self._repo.get_team_by_lead(lead_user_id)
+            team_ids = await self._get_all_team_ids(lead_user_id)
         except Exception as exc:
             logger.error(
                 "tl_team_overview_failed",
@@ -260,15 +287,14 @@ class TeamLeadService:
         if not team:
             raise NotFoundException("No active team found for this team lead.")
 
-        team_id = str(team.id)
         try:
-            workloads        = await self._repo.get_agent_workloads(team_id)
-            unassigned_count = await self._repo.unassigned_count(team_id)
+            workloads        = await self._repo.get_agent_workloads_multi(team_ids)
+            unassigned_count = await self._repo.unassigned_count_multi(team_ids)
         except Exception as exc:
             logger.error(
                 "tl_team_overview_stats_failed",
                 lead_user_id=lead_user_id,
-                team_id=team_id,
+                team_ids=team_ids,
                 error=str(exc),
             )
             raise
@@ -286,7 +312,7 @@ class TeamLeadService:
         logger.info(
             "tl_team_overview_fetched",
             lead_user_id=lead_user_id,
-            team_id=team_id,
+            team_ids=team_ids,
             agent_count=len(agents),
             unassigned_count=unassigned_count,
         )
@@ -298,6 +324,79 @@ class TeamLeadService:
             unassigned_count=unassigned_count,
             agents=agents,
         )
+
+    # ── Thread ────────────────────────────────────────────────────────────────
+
+    async def get_ticket_thread(
+        self,
+        ticket_id: str,
+        lead_user_id: str,
+    ) -> dict:
+        """Fetch all conversations and attachments for a ticket in any of TL's teams."""
+        team_ids = await self._get_all_team_ids(lead_user_id)
+        try:
+            conversations, attachments = await self._repo.get_ticket_conversations(
+                ticket_id, team_ids
+            )
+        except ValueError as exc:
+            raise NotFoundException(str(exc))
+        except Exception as exc:
+            logger.error(
+                "tl_get_thread_failed",
+                ticket_id=ticket_id,
+                lead_user_id=lead_user_id,
+                error=str(exc),
+            )
+            raise
+
+        logger.info(
+            "tl_ticket_thread_fetched",
+            ticket_id=ticket_id,
+            lead_user_id=lead_user_id,
+            conversation_count=len(conversations),
+            attachment_count=len(attachments),
+        )
+        return {
+            "conversations": conversations,
+            "attachments":   attachments,
+        }
+
+    # ── Internal note ─────────────────────────────────────────────────────────
+
+    async def add_internal_note(
+        self,
+        ticket_id: str,
+        content: str,
+        lead_user_id: str,
+    ) -> "Conversation":
+        """TL posts internal note — always is_internal=True, never customer-visible."""
+        team_ids = await self._get_all_team_ids(lead_user_id)
+        try:
+            note = await self._repo.add_internal_note(
+                ticket_id=ticket_id,
+                team_ids=team_ids,
+                author_id=lead_user_id,
+                content=content,
+            )
+        except ValueError as exc:
+            raise NotFoundException(str(exc))
+        except Exception as exc:
+            logger.error(
+                "tl_add_note_failed",
+                ticket_id=ticket_id,
+                lead_user_id=lead_user_id,
+                error=str(exc),
+            )
+            raise
+
+        await self._session.commit()
+
+        logger.info(
+            "tl_internal_note_added",
+            ticket_id=ticket_id,
+            lead_user_id=lead_user_id,
+        )
+        return note
 
     # ── SSE helper ────────────────────────────────────────────────────────────
 
