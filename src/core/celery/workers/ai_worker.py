@@ -1,8 +1,7 @@
 """
-AI Celery worker — classification, SLA assignment, auto-assign (team-aware), draft.
-ticket-service: src/core/celery/workers/ai_worker.py
+AI Celery worker — classification, SLA assignment, auto-assign, draft.
+src/core/celery/workers/ai_worker.py
 """
-
 from __future__ import annotations
 
 import asyncio
@@ -20,7 +19,6 @@ logger = get_logger(__name__)
 
 ASSIGN_THRESHOLD = 0.45
 
-# ── Module-level singleton — loaded once per worker process ───────────────────
 _embedding_model = None
 
 
@@ -35,47 +33,46 @@ def _get_embedding_model():
 
 # ── AI Classification ─────────────────────────────────────────────────────────
 
-@celery_app.task(
-    name="ticket.ai.classify",
-    bind=True,
-    max_retries=3,
-)
-def run_ai_classification(
-    self,
-    ticket_id: str,
-    customer_email: str | None = None,
-) -> dict:
+@celery_app.task(name="ticket.ai.classify", bind=True, max_retries=3)
+def run_ai_classification(self, ticket_id: str, customer_email: str | None = None) -> dict:
     """
-    Classify ticket:
-      1. LLM derives system severity from title + description
-      2. Resolve tier_name → tier_id via auth-service HTTP (cached per process)
-      3. severity + tier_id → SeverityPriorityMap → priority
-      4. priority + tier_id → SLARule → sla_response_due + sla_resolve_due
-    Then chains: auto_assign + draft
+    1. LLM → system_severity + reason
+    2. tier_snapshot already on ticket — use directly, no fetch_tier_id call
+    3. severity + tier_id → priority  (SeverityPriorityMap table)
+    4. priority + tier_id → SLA       (SLARule table)
+    5. persist fields
+    6. notify customer on ticket raise (preference-aware)
+    7. chain auto_assign + draft
     """
 
     async def _run() -> dict:
         from src.control.agents.clasifier_agent import ClassifierAgent
-        from src.core.celery.utils import fetch_tier_id
         from src.data.clients.postgres_client import CelerySessionFactory
-        from src.data.repositories.ticket_repository import TicketRepository
+        from src.data.repositories.ticket_repository import TicketRepository, NotificationRepository
         from src.data.repositories.admin_repository import (
             SLARuleRepository,
             SeverityPriorityMapRepository,
+            TierRepository,
         )
+        from src.data.repositories.notification_preference_repository import NotificationPreferenceRepository
+        from src.core.services.audit_service import audit_service
+        from src.config.settings import settings
         from datetime import datetime, timezone, timedelta
 
         async with CelerySessionFactory() as session:
-            repo     = TicketRepository(session)
-            sla_repo = SLARuleRepository(session)
-            sev_repo = SeverityPriorityMapRepository(session)
+            repo       = TicketRepository(session)
+            sla_repo   = SLARuleRepository(session)
+            sev_repo   = SeverityPriorityMapRepository(session)
+            tier_repo  = TierRepository(session)
+            notif_repo = NotificationRepository(session)
+            pref_repo  = NotificationPreferenceRepository(session)
 
             ticket = await repo.get_by_id(ticket_id)
             if not ticket:
                 logger.error("ai_classify_ticket_not_found", ticket_id=ticket_id)
                 return {"error": f"Ticket {ticket_id} not found"}
 
-            # ── Step 1: LLM classifies system severity ────────────────────────
+            # ── Step 1: LLM severity ──────────────────────────────────────
             agent  = ClassifierAgent()
             result = await agent.classify(
                 title=ticket.title or "",
@@ -83,38 +80,41 @@ def run_ai_classification(
             )
             system_severity = result.severity
 
-            # ── Step 2: resolve tier_name → tier_id via auth-service HTTP ─────
-            tier_name = ticket.tier_snapshot or "starter"
-            tier_id   = await fetch_tier_id(tier_name)
-
-            if not tier_id:
+            # ── Step 2: tier_snapshot → tier_id (no fallback, no default) ─
+            # tier_snapshot is frozen at ticket creation from the customer JWT.
+            # If it's None, the customer had no subscription for that product.
+            tier_id = None
+            if ticket.tier_snapshot:
+                tier_id = await tier_repo.get_id_by_name(ticket.tier_snapshot)
+                if not tier_id:
+                    logger.warning(
+                        "ai_classify_tier_id_unresolved",
+                        ticket_id=ticket_id,
+                        tier_snapshot=ticket.tier_snapshot,
+                    )
+            else:
                 logger.warning(
-                    "ai_classify_tier_id_unresolved",
+                    "ai_classify_no_tier_snapshot",
                     ticket_id=ticket_id,
-                    tier_name=tier_name,
                 )
 
-            # ── Step 3: severity + tier_id → priority ─────────────────────────
+            # ── Step 3: severity + tier_id → priority ─────────────────────
             sev_map = None
             if tier_id:
                 sev_map = await sev_repo.get_by_severity_and_tier(system_severity, tier_id)
 
             system_priority = sev_map.derived_priority if sev_map else "P3"
 
-            # ── Step 4: SLA deadlines ─────────────────────────────────────────
+            # ── Step 4: priority + tier_id → SLA deadlines ────────────────
             sla = None
             if tier_id:
                 sla = await sla_repo.get_by_tier_and_priority(tier_id, system_priority)
 
             now = datetime.now(timezone.utc)
-            sla_response_due = (
-                now + timedelta(minutes=sla.response_time_min) if sla else None
-            )
-            sla_resolve_due = (
-                now + timedelta(minutes=sla.resolution_time_min) if sla else None
-            )
+            sla_response_due = (now + timedelta(minutes=sla.response_time_min))   if sla else None
+            sla_resolve_due  = (now + timedelta(minutes=sla.resolution_time_min)) if sla else None
 
-            # ── Step 5: override flag ─────────────────────────────────────────
+            # ── Step 5: priority_overridden flag ──────────────────────────
             priority_overridden = (
                 ticket.customer_priority is not None
                 and system_severity != ticket.customer_priority
@@ -134,12 +134,33 @@ def run_ai_classification(
                 ticket_id=ticket_id,
                 system_severity=system_severity,
                 system_priority=system_priority,
-                tier_name=tier_name,
-                tier_id=tier_id,
+                tier_snapshot=ticket.tier_snapshot,
+                tier_id=str(tier_id) if tier_id else None,
                 priority_overridden=priority_overridden,
             )
 
-            # ── Step 6: notify customer of override ───────────────────────────
+            # ── Audit: classification ─────────────────────────────────────
+            try:
+                await audit_service.log(
+                    entity_type="ticket",
+                    entity_id=ticket.id,
+                    action="ticket_classified",
+                    actor_id=ticket.customer_id,
+                    actor_type="system",
+                    new_value={
+                        "severity":            system_severity,
+                        "priority":            system_priority,
+                        "tier_snapshot":       ticket.tier_snapshot,
+                        "priority_overridden": priority_overridden,
+                        "sla_response_due":    sla_response_due.isoformat() if sla_response_due else None,
+                        "sla_resolve_due":     sla_resolve_due.isoformat() if sla_resolve_due else None,
+                    },
+                    ticket_id=ticket.id,
+                )
+            except Exception as exc:
+                logger.warning("audit_classify_failed", ticket_id=ticket_id, error=str(exc))
+
+            # ── Step 6a: notify customer of override (preference-aware) ───
             if priority_overridden and customer_email:
                 run_ai_priority_override.delay(
                     ticket_id,
@@ -147,11 +168,50 @@ def run_ai_classification(
                     system_priority,
                     result.reason,
                     customer_email,
+                    str(ticket.customer_id),
                 )
 
             await session.commit()
 
-        # ── Chain: auto_assign + draft run in parallel ────────────────────────
+            # ── Step 6b: notify customer on ticket raise (preference-aware)
+            try:
+                sla_str = (
+                    sla_response_due.strftime("%Y-%m-%d %H:%M UTC")
+                    if sla_response_due else "N/A"
+                )
+                title   = f"Ticket {ticket.ticket_number} raised successfully"
+                message = (
+                    f"Your ticket '{ticket.title}' has been received. "
+                    f"Our team will review and respond shortly. "
+                    f"Expected response by: {sla_str}"
+                )
+                await _notify_actor(
+                    actor_id=str(ticket.customer_id),
+                    ticket=ticket,
+                    pref_repo=pref_repo,
+                    notif_repo=notif_repo,
+                    session=session,
+                    settings=settings,
+                    is_internal=False,
+                    notif_type="ticket_created",
+                    title=title,
+                    message=message,
+                    fallback_email=customer_email,
+                    email_subject=f"[{ticket.ticket_number}] Your ticket has been received",
+                    email_body=(
+                        f"Dear Customer,\n\n"
+                        f"Your support ticket has been successfully raised.\n\n"
+                        f"Ticket: {ticket.ticket_number}\n"
+                        f"Title:  {ticket.title}\n\n"
+                        f"Our team will review and respond within your SLA window.\n"
+                        f"Expected response by: {sla_str}\n\n"
+                        f"— Ticketing Genie Support Team"
+                    ),
+                )
+            except Exception as exc:
+                logger.warning("ticket_raise_notification_failed", error=str(exc))
+
+        # ── Step 7: chain auto_assign + draft ─────────────────────────────
         run_auto_assign.delay(ticket_id, customer_email=customer_email)
         run_ai_draft.delay(ticket_id)
 
@@ -170,43 +230,35 @@ def run_ai_classification(
 
 # ── Auto-Assign ───────────────────────────────────────────────────────────────
 
-@celery_app.task(
-    name="ticket.ai.auto_assign",
-    bind=True,
-    max_retries=3,
-)
-def run_auto_assign(
-    self,
-    ticket_id: str,
-    customer_email: str | None = None,
-) -> dict:
+@celery_app.task(name="ticket.ai.auto_assign", bind=True, max_retries=3)
+def run_auto_assign(self, ticket_id: str, customer_email: str | None = None) -> dict:
     """
-    Auto-assign flow:
-      1. product_id → active teams for that product
-      2. TeamRoutingAgent (ChatGroq + structured output) picks the team
-      3. Score all active members of that team:
-            skill_score  (cosine similarity: ticket embedding vs member skill embedding)
-            exp_score    (years of experience, capped at 10 yrs)
-            load_score   (inverse of open ticket count)
-      4. best_score >= ASSIGN_THRESHOLD → assign to agent queue
-         else                           → route to team_lead queue
-      5. Notify agent (in-app + email) and customer (email) in both branches
+    1. product_id → active teams
+    2. TeamRoutingAgent (title + description + team names only)
+    3. Score members: skill(0.4) + exp(0.2) + load(0.4)
+    4. best >= ASSIGN_THRESHOLD → assign to agent
+       else → set team_id only, assigned_to=None
+              team lead fetches unassigned tickets later, assigns manually
+              no special notification/action triggered here
+    5. Agent notified by preference (in_app OR email, not both)
+    6. Customer notified by preference
+    7. Critical ticket → only THIS ticket's team lead notified, by preference
     """
 
     async def _run() -> dict:
         from src.config.settings import settings
         from src.core.sse.redis_subscriber import publish_queue_update, publish_notification
+        from src.core.services.audit_service import audit_service
         from src.data.clients.postgres_client import CelerySessionFactory
-        from src.data.models.postgres.models import Notification, Team, TeamMember, Ticket
-        from src.data.repositories.ticket_repository import (
-            TicketRepository,
-            NotificationRepository,
-        )
+        from src.data.models.postgres.models import Team, TeamMember, Ticket
+        from src.data.repositories.ticket_repository import TicketRepository, NotificationRepository
+        from src.data.repositories.notification_preference_repository import NotificationPreferenceRepository
         from sqlalchemy import select
 
         async with CelerySessionFactory() as session:
             ticket_repo = TicketRepository(session)
             notif_repo  = NotificationRepository(session)
+            pref_repo   = NotificationPreferenceRepository(session)
 
             ticket = await ticket_repo.get_by_id(ticket_id)
             if not ticket:
@@ -221,7 +273,7 @@ def run_auto_assign(
                 logger.warning("auto_assign_no_product_id", ticket_id=ticket_id)
                 return {"error": "No product_id on ticket"}
 
-            # ── Step 1: teams for this product ────────────────────────────────
+            # ── Step 1: teams for this product ────────────────────────────
             teams_result = await session.execute(
                 select(Team).where(
                     Team.product_id == ticket.product_id,
@@ -237,7 +289,7 @@ def run_auto_assign(
                 )
                 return {"error": "No teams for product"}
 
-            # ── Step 2: TeamRoutingAgent picks the correct team ───────────────
+            # ── Step 2: TeamRoutingAgent ──────────────────────────────────
             selected_team = await _llm_pick_team(ticket=ticket, teams=teams)
             if not selected_team:
                 selected_team = teams[0]
@@ -247,7 +299,7 @@ def run_auto_assign(
                     team=selected_team.name,
                 )
 
-            # ── Step 3: load active team members ──────────────────────────────
+            # ── Step 3: active members ────────────────────────────────────
             members_result = await session.execute(
                 select(TeamMember).where(
                     TeamMember.team_id == selected_team.id,
@@ -257,21 +309,22 @@ def run_auto_assign(
             members: list[TeamMember] = list(members_result.scalars().all())
 
             if not members:
-                logger.warning("auto_assign_no_members", team_id=str(selected_team.id))
-                await ticket_repo.update_fields(ticket_id, {"team_id": selected_team.id})
+                # No agents in team — set team_id, leave assigned_to=None.
+                # Team lead will see this ticket as unassigned and assign manually.
+                # No notification triggered here.
+                logger.warning(
+                    "auto_assign_no_members_in_team",
+                    ticket_id=ticket_id,
+                    team_id=str(selected_team.id),
+                )
+                await ticket_repo.update_fields(ticket_id, {
+                    "team_id":     selected_team.id,
+                    "assigned_to": None,
+                })
                 await session.commit()
+                return {"routed": True, "reason": "no_members_in_team", "team_id": str(selected_team.id)}
 
-                if selected_team.team_lead_id:
-                    publish_queue_update(
-                        settings.CELERY_BROKER_URL,
-                        str(selected_team.team_lead_id),
-                        _ticket_payload(ticket, "no_agents_in_team"),
-                    )
-
-                _fire_customer_pending_email(ticket, customer_email)
-                return {"routed_to_team_lead": True, "reason": "no_members"}
-
-            # ── Step 4: score each member ─────────────────────────────────────
+            # ── Step 4: score members (skill 0.4, exp 0.2, load 0.4) ──────
             ticket_embedding = _compute_ticket_embedding(ticket)
             workload_map     = await _get_workload_map(session, members)
 
@@ -283,11 +336,6 @@ def run_auto_assign(
                     workload=workload_map.get(str(member.user_id), 0),
                 )
                 scored.append((member, score))
-                logger.debug(
-                    "auto_assign_member_score",
-                    member_id=str(member.id),
-                    score=round(score, 3),
-                )
 
             scored.sort(key=lambda x: x[1], reverse=True)
             best_member, best_score = scored[0]
@@ -300,71 +348,113 @@ def run_auto_assign(
                 threshold=ASSIGN_THRESHOLD,
             )
 
-            # ── Step 5a: assign to agent ──────────────────────────────────────
+            # ── Step 5a: above threshold → assign ────────────────────────
             if best_score >= ASSIGN_THRESHOLD:
                 from src.core.celery.utils import fetch_agent_name, fetch_user_email
 
                 agent_name     = await fetch_agent_name(best_member.user_id) or "Support Agent"
-                resolved_email = customer_email or await fetch_user_email(ticket.customer_id)
+                resolved_email = customer_email or await _safe_fetch_email(ticket.customer_id)
 
                 await ticket_repo.update_fields(ticket_id, {
                     "team_id":     selected_team.id,
                     "assigned_to": best_member.user_id,
                 })
-
-                notif = Notification(
-                    channel="in_app",
-                    recipient_id=best_member.user_id,
-                    ticket_id=ticket.id,
-                    is_internal=True,
-                    type="ticket_assigned",
-                    title=f"Ticket {ticket.ticket_number} assigned to you",
-                    message=(
-                        f"Ticket {ticket.ticket_number} auto-assigned to you.\n"
-                        f"Priority: {ticket.priority} | Severity: {ticket.severity}\n"
-                        f"Tier: {ticket.tier_snapshot or 'N/A'} | "
-                        f"SLA Response due: "
-                        + (ticket.sla_response_due.strftime("%Y-%m-%d %H:%M UTC")
-                           if ticket.sla_response_due else "N/A")
-                    ),
-                )
-                await notif_repo.create(notif)
                 await session.commit()
-
-                publish_queue_update(
-                    settings.CELERY_BROKER_URL,
-                    str(best_member.user_id),
-                    _ticket_payload(ticket, "assigned"),
-                )
-                publish_notification(
-                    settings.CELERY_BROKER_URL,
-                    str(best_member.user_id),
-                    {
-                        "type":          "ticket_assigned",
-                        "title":         f"Ticket {ticket.ticket_number} assigned to you",
-                        "message":       (
-                            f"Priority: {ticket.priority} | "
-                            f"Severity: {ticket.severity} | "
-                            f"Tier: {ticket.tier_snapshot or 'N/A'}"
-                        ),
-                        "ticket_number": ticket.ticket_number,
-                    },
-                )
 
                 logger.info(
                     "ticket_auto_assigned",
                     ticket_id=ticket_id,
                     agent_user_id=str(best_member.user_id),
-                    agent_name=agent_name,
                     score=round(best_score, 3),
                 )
 
-                _fire_agent_email(ticket, best_member, agent_name)
-                _fire_customer_assignment_email(ticket, agent_name, resolved_email)
+                # ── Audit: assignment ─────────────────────────────────────
+                try:
+                    await audit_service.log(
+                        entity_type="ticket",
+                        entity_id=ticket.id,
+                        action="ticket_auto_assigned",
+                        actor_id=ticket.customer_id,
+                        actor_type="system",
+                        new_value={
+                            "assigned_to": str(best_member.user_id),
+                            "team_id":     str(selected_team.id),
+                            "score":       round(best_score, 3),
+                        },
+                        ticket_id=ticket.id,
+                    )
+                except Exception as exc:
+                    logger.warning("audit_assign_failed", ticket_id=ticket_id, error=str(exc))
 
-                if ticket.priority in ("P0", "critical"):
-                    from src.core.celery.workers.notification_worker import alert_team_leads
-                    alert_team_leads.delay(
+                # Agent notification — preference-aware (in_app OR email, not both)
+                sla_str = (
+                    ticket.sla_response_due.strftime("%Y-%m-%d %H:%M UTC")
+                    if ticket.sla_response_due else "N/A"
+                )
+                sla_resolve_str = (
+                    ticket.sla_resolve_due.strftime("%Y-%m-%d %H:%M UTC")
+                    if ticket.sla_resolve_due else "N/A"
+                )
+                agent_notif_title   = f"Ticket {ticket.ticket_number} assigned to you"
+                agent_notif_message = (
+                    f"Ticket {ticket.ticket_number} auto-assigned to you.\n"
+                    f"Priority: {ticket.priority} | Severity: {ticket.severity} | "
+                    f"Tier: {ticket.tier_snapshot or 'N/A'}\n"
+                    f"SLA Response due: {sla_str}"
+                )
+                await _notify_actor(
+                    actor_id=str(best_member.user_id),
+                    ticket=ticket,
+                    pref_repo=pref_repo,
+                    notif_repo=notif_repo,
+                    session=session,
+                    settings=settings,
+                    is_internal=True,
+                    notif_type="ticket_assigned",
+                    title=agent_notif_title,
+                    message=agent_notif_message,
+                    fallback_email=None,   # email fetched inside if needed
+                    email_subject=f"[Ticketing Genie] New ticket assigned: {ticket.ticket_number}",
+                    email_body=(
+                        f"Hi {agent_name},\n\n"
+                        f"A new ticket has been assigned to you.\n\n"
+                        f"Ticket:      {ticket.ticket_number}\n"
+                        f"Title:       {ticket.title}\n"
+                        f"Priority:    {ticket.priority}\n"
+                        f"Severity:    {ticket.severity}\n"
+                        f"Tier:        {ticket.tier_snapshot or 'N/A'}\n"
+                        f"Environment: {ticket.environment or 'N/A'}\n\n"
+                        f"SLA Response due:   {sla_str}\n"
+                        f"SLA Resolution due: {sla_resolve_str}\n\n"
+                        f"Please respond to the customer within your SLA window.\n\n"
+                        f"— Ticketing Genie"
+                    ),
+                    recipient_id_for_email=str(best_member.user_id),
+                    recipient_type_for_email="persona",
+                )
+
+                # Also push queue update for agent's live dashboard
+                publish_queue_update(
+                    settings.CELERY_BROKER_URL,
+                    str(best_member.user_id),
+                    _ticket_payload(ticket, "assigned"),
+                )
+
+                # Customer notification — preference-aware
+                await _notify_customer(
+                    ticket=ticket,
+                    customer_email=resolved_email,
+                    pref_repo=pref_repo,
+                    notif_repo=notif_repo,
+                    session=session,
+                    event="assigned",
+                    agent_name=agent_name,
+                )
+
+                # Critical ticket → notify only THIS team's team lead, preference-aware
+                if ticket.priority in ("P0", "critical") and selected_team.team_lead_id:
+                    from src.core.celery.workers.notification_worker import alert_team_lead
+                    alert_team_lead.delay(
                         ticket_id=ticket_id,
                         ticket_number=ticket.ticket_number,
                         title=ticket.title or "",
@@ -372,12 +462,15 @@ def run_auto_assign(
                         severity=ticket.severity or "",
                         assigned_to=str(best_member.user_id),
                         assigned_to_name=agent_name,
-                        reason="Critical ticket auto-assigned — immediate TL awareness required.",
+                        team_lead_id=str(selected_team.team_lead_id),
+                        reason="Critical ticket auto-assigned — heads up.",
                     )
 
                 return {"assigned_to": str(best_member.user_id), "score": best_score}
 
-            # ── Step 5b: below threshold → team lead queue ────────────────────
+            # ── Step 5b: below threshold → team_id set, assigned_to=None ──
+            # Team lead will see this ticket in the unassigned queue and
+            # manually assign it. No notification triggered here.
             else:
                 await ticket_repo.update_fields(ticket_id, {
                     "team_id":     selected_team.id,
@@ -386,35 +479,36 @@ def run_auto_assign(
                 await session.commit()
 
                 logger.info(
-                    "auto_assign_routed_to_team_lead",
+                    "auto_assign_below_threshold_unassigned",
                     ticket_id=ticket_id,
                     team_id=str(selected_team.id),
                     best_score=round(best_score, 3),
                 )
 
-                if selected_team.team_lead_id:
-                    publish_queue_update(
-                        settings.CELERY_BROKER_URL,
-                        str(selected_team.team_lead_id),
-                        _ticket_payload(ticket, "needs_manual_assign"),
-                    )
-                    publish_notification(
-                        settings.CELERY_BROKER_URL,
-                        str(selected_team.team_lead_id),
-                        {
-                            "type":          "ticket_needs_assign",
-                            "title":         f"Ticket {ticket.ticket_number} needs manual assignment",
-                            "message":       (
-                                f"No agent met threshold ({best_score:.2f}). Please assign."
-                            ),
-                            "ticket_number": ticket.ticket_number,
+                # ── Audit: unassigned routing ─────────────────────────────
+                try:
+                    await audit_service.log(
+                        entity_type="ticket",
+                        entity_id=ticket.id,
+                        action="ticket_routed_unassigned",
+                        actor_id=ticket.customer_id,
+                        actor_type="system",
+                        new_value={
+                            "team_id":    str(selected_team.id),
+                            "best_score": round(best_score, 3),
+                            "reason":     "below_threshold",
                         },
+                        ticket_id=ticket.id,
                     )
+                except Exception as exc:
+                    logger.warning("audit_unassigned_failed", ticket_id=ticket_id, error=str(exc))
 
-                resolved_email = customer_email or await _safe_fetch_email(ticket.customer_id)
-                _fire_customer_pending_email(ticket, resolved_email)
-
-                return {"routed_to_team_lead": True, "score": best_score}
+                return {
+                    "assigned_to": None,
+                    "team_id":     str(selected_team.id),
+                    "score":       best_score,
+                    "reason":      "below_threshold",
+                }
 
     try:
         return asyncio.run(_run())
@@ -425,16 +519,13 @@ def run_auto_assign(
 
 # ── AI Draft ──────────────────────────────────────────────────────────────────
 
-@celery_app.task(
-    name="ticket.ai.draft",
-    bind=True,
-    max_retries=2,
-)
+@celery_app.task(name="ticket.ai.draft", bind=True, max_retries=2)
 def run_ai_draft(self, ticket_id: str) -> dict:
-    """Generate AI draft reply and persist to ticket.ai_draft."""
+    """Generate short 5-line AI draft and persist to ticket.ai_draft."""
 
     async def _run() -> dict:
         from src.control.agents.draft_agent import DraftAgent
+        from src.core.services.audit_service import audit_service
         from src.data.clients.postgres_client import CelerySessionFactory
         from src.data.repositories.ticket_repository import TicketRepository
 
@@ -449,8 +540,23 @@ def run_ai_draft(self, ticket_id: str) -> dict:
                 ticket_title=ticket.title or "",
                 ticket_description=ticket.description or "",
             )
-            await repo.update_fields(ticket_id, {"ai_draft": result.body if result else ""})
+            draft_body = result.body if result else ""
+            await repo.update_fields(ticket_id, {"ai_draft": draft_body})
             await session.commit()
+
+            # ── Audit: draft generated ────────────────────────────────────
+            try:
+                await audit_service.log(
+                    entity_type="ticket",
+                    entity_id=ticket.id,
+                    action="ai_draft_generated",
+                    actor_id=ticket.customer_id,
+                    actor_type="system",
+                    new_value={"draft_preview": draft_body[:100] if draft_body else ""},
+                    ticket_id=ticket.id,
+                )
+            except Exception as exc:
+                logger.warning("audit_draft_failed", ticket_id=ticket_id, error=str(exc))
 
         logger.info("ai_draft_generated", ticket_id=ticket_id)
         return {"draft_generated": True}
@@ -466,105 +572,283 @@ def run_ai_draft(self, ticket_id: str) -> dict:
 
 @celery_app.task(name="ticket.ai.priority_override")
 def run_ai_priority_override(
-    ticket_id: str,
+    ticket_id:         str,
     original_severity: str,
-    new_priority: str,
-    reason: str,
-    customer_email: str | None = None,
+    new_priority:      str,
+    reason:            str,
+    customer_email:    str | None = None,
+    customer_id:       str | None = None,
 ) -> None:
-    """Notify customer when AI overrides their submitted severity."""
+    """
+    Notify customer when AI overrides their submitted severity.
+    Fully preference-aware — in_app or email, same message content.
+    """
 
     async def _notify() -> None:
+        from src.config.settings import settings
         from src.data.clients.postgres_client import CelerySessionFactory
-        from src.data.repositories.ticket_repository import TicketRepository
+        from src.data.repositories.ticket_repository import TicketRepository, NotificationRepository
+        from src.data.repositories.notification_preference_repository import NotificationPreferenceRepository
 
         async with CelerySessionFactory() as session:
             ticket = await TicketRepository(session).get_by_id(ticket_id)
-            if not ticket or not customer_email:
+            if not ticket:
                 return
 
-        from src.core.celery.workers.email_worker import send_notification_email
-        send_notification_email.delay(
-            recipient_id=str(ticket.customer_id),
-            recipient_type="customer",
-            subject=f"[{ticket.ticket_number}] Priority updated by system",
-            body=(
-                f"Dear Customer,\n\n"
-                f"The severity of your ticket {ticket.ticket_number} has been "
-                f"reviewed. Your reported severity was '{original_severity}', "
-                f"and our system has assigned priority '{new_priority}'.\n\n"
-                f"Reason: {reason}\n\n"
-                f"This ensures your ticket receives the appropriate attention.\n\n"
-                f"— Ticketing Genie"
-            ),
-            recipient_email=customer_email,
-        )
+            notif_repo = NotificationRepository(session)
+            pref_repo  = NotificationPreferenceRepository(session)
+
+            abstract_reason = _abstract_priority_reason(original_severity, new_priority, reason)
+
+            title   = f"Ticket {ticket.ticket_number} priority has been updated"
+            message = (
+                f"We have reviewed your ticket and adjusted its priority "
+                f"to ensure the right level of attention.\n\n"
+                f"{abstract_reason}"
+            )
+
+            await _notify_actor(
+                actor_id=str(ticket.customer_id),
+                ticket=ticket,
+                pref_repo=pref_repo,
+                notif_repo=notif_repo,
+                session=session,
+                settings=settings,
+                is_internal=False,
+                notif_type="ticket_priority_updated",
+                title=title,
+                message=message,
+                fallback_email=customer_email,
+                email_subject=f"[{ticket.ticket_number}] Your ticket priority has been updated",
+                email_body=(
+                    f"Dear Customer,\n\n"
+                    f"We have reviewed your ticket {ticket.ticket_number} and adjusted its priority "
+                    f"to ensure it receives the right level of attention.\n\n"
+                    f"{abstract_reason}\n\n"
+                    f"Our team will be in touch based on the updated priority.\n\n"
+                    f"— Ticketing Genie Support Team"
+                ),
+            )
 
     asyncio.run(_notify())
 
 
-# ── Team routing via TeamRoutingAgent ─────────────────────────────────────────
+def _abstract_priority_reason(original_severity: str, new_priority: str, reason: str) -> str:
+    priority_label = {
+        "P0": "Critical — immediate attention",
+        "P1": "High — addressed within the day",
+        "P2": "Medium — addressed within 2 business days",
+        "P3": "Standard — addressed within our regular SLA",
+    }.get(new_priority, "Standard")
+
+    return (
+        f"Your ticket has been assigned priority: {priority_label}.\n"
+        f"Our assessment: {reason}"
+    )
+
+
+# ── Team routing ──────────────────────────────────────────────────────────────
 
 async def _llm_pick_team(ticket, teams: list) -> object | None:
-    """
-    Use TeamRoutingAgent (ChatGroq + structured output) to pick the best team.
-
-    Exact name match first, then case-insensitive fallback.
-    Returns None if name cannot be matched — caller falls back to teams[0].
-    """
     from src.control.agents.routing_agent import TeamRoutingAgent
 
     team_names = [t.name for t in teams]
-
     agent  = TeamRoutingAgent()
     result = await agent.route(
         title=ticket.title or "",
         description=ticket.description or "",
-        severity=ticket.severity or "unknown",
         team_names=team_names,
     )
 
-    # Exact match
     for team in teams:
         if team.name == result.team_name:
-            logger.info(
-                "auto_assign_team_selected",
-                team=team.name,
-                reason=result.reason,
-                ticket_id=str(ticket.id),
-            )
+            logger.info("auto_assign_team_selected", team=team.name, ticket_id=str(ticket.id))
             return team
 
-    # Case-insensitive fallback
     for team in teams:
         if team.name.lower() == result.team_name.lower():
-            logger.info(
-                "auto_assign_team_selected_case_insensitive",
-                team=team.name,
-                ticket_id=str(ticket.id),
-            )
+            logger.info("auto_assign_team_selected_ci", team=team.name, ticket_id=str(ticket.id))
             return team
 
     logger.warning(
-        "auto_assign_team_name_not_matched",
+        "auto_assign_team_not_matched",
         returned=result.team_name,
         available=team_names,
     )
     return None
 
 
+# ── Universal preference-aware notification ───────────────────────────────────
+
+async def _notify_actor(
+    actor_id:               str,
+    ticket,
+    pref_repo,
+    notif_repo,
+    session,
+    settings,
+    is_internal:            bool,
+    notif_type:             str,
+    title:                  str,
+    message:                str,
+    fallback_email:         str | None,
+    email_subject:          str,
+    email_body:             str,
+    recipient_id_for_email: str | None = None,   # defaults to actor_id
+    recipient_type_for_email: str = "customer",
+) -> None:
+    """
+    Single entry-point for all preference-aware notifications.
+    Reads preferred_contact for actor_id → sends in_app OR email.
+    Same title/message content regardless of channel.
+    """
+    from src.core.sse.redis_subscriber import publish_notification
+    from src.data.models.postgres.models import Notification
+    import uuid as _uuid
+
+    try:
+        channel = await pref_repo.get_preferred_contact(actor_id)
+
+        logger.info(
+            "notify_actor_channel_resolved",
+            actor_id=actor_id,
+            channel=channel,
+            notif_type=notif_type,
+        )
+
+        if channel == "in_app":
+            notif = Notification(
+                channel="in_app",
+                recipient_id=_uuid.UUID(actor_id),
+                ticket_id=ticket.id,
+                is_internal=is_internal,
+                type=notif_type,
+                title=title,
+                message=message,
+            )
+            await notif_repo.create(notif)
+            await session.commit()
+
+            publish_notification(
+                settings.CELERY_BROKER_URL,
+                actor_id,
+                {
+                    "type":          notif_type,
+                    "title":         title,
+                    "message":       message,
+                    "ticket_number": ticket.ticket_number,
+                },
+            )
+        else:
+            # email
+            email_to_use = fallback_email
+            if not email_to_use:
+                email_to_use = await _safe_fetch_email_str(actor_id)
+
+            if email_to_use:
+                from src.core.celery.workers.email_worker import send_notification_email
+                send_notification_email.delay(
+                    recipient_id=recipient_id_for_email or actor_id,
+                    recipient_type=recipient_type_for_email,
+                    subject=email_subject,
+                    body=email_body,
+                    recipient_email=email_to_use,
+                )
+
+    except Exception as exc:
+        logger.warning(
+            "notify_actor_failed",
+            actor_id=actor_id,
+            notif_type=notif_type,
+            error=str(exc),
+        )
+
+
+# ── Customer notification (wraps _notify_actor with event-based content) ──────
+
+async def _notify_customer(
+    ticket,
+    customer_email: str | None,
+    pref_repo,
+    notif_repo,
+    session,
+    event:      str,
+    agent_name: str | None = None,
+) -> None:
+    from src.config.settings import settings
+
+    sla_str = (
+        ticket.sla_response_due.strftime("%Y-%m-%d %H:%M UTC")
+        if ticket.sla_response_due else "N/A"
+    )
+
+    if event == "assigned":
+        title   = f"Your ticket {ticket.ticket_number} has been assigned"
+        message = (
+            f"An agent has been assigned to your ticket.\n"
+            f"Priority: {ticket.priority} | Expected response by: {sla_str}"
+        )
+        if agent_name:
+            message = f"Agent: {agent_name}\n" + message
+
+        email_subject = f"[{ticket.ticket_number}] Agent assigned — we're on it"
+        override_line = ""
+        if ticket.priority_overridden and ticket.override_reason:
+            override_line = (
+                f"\nNote: We reviewed your reported severity and adjusted the priority "
+                f"to ensure the right response time.\n"
+            )
+        email_body = (
+            f"Dear Customer,\n\n"
+            f"Your ticket {ticket.ticket_number} has been assigned to a support agent.\n\n"
+            f"Agent:                {agent_name or 'Support Agent'}\n"
+            f"Priority:             {ticket.priority}\n"
+            f"Expected response by: {sla_str}\n"
+            f"{override_line}\n"
+            f"Our agent will reach out to you shortly.\n\n"
+            f"— Ticketing Genie Support Team"
+        )
+    else:
+        title   = f"Your ticket {ticket.ticket_number} is being reviewed"
+        message = (
+            f"Your ticket is being reviewed by our team.\n"
+            f"Expected response by: {sla_str}"
+        )
+        email_subject = f"[{ticket.ticket_number}] Your ticket is being reviewed"
+        email_body = (
+            f"Dear Customer,\n\n"
+            f"Your ticket {ticket.ticket_number} has been received and is being reviewed "
+            f"by our team for assignment.\n\n"
+            f"Priority:             {ticket.priority}\n"
+            f"Expected response by: {sla_str}\n\n"
+            f"An agent will be assigned shortly.\n\n"
+            f"— Ticketing Genie Support Team"
+        )
+
+    await _notify_actor(
+        actor_id=str(ticket.customer_id),
+        ticket=ticket,
+        pref_repo=pref_repo,
+        notif_repo=notif_repo,
+        session=session,
+        settings=settings,
+        is_internal=False,
+        notif_type=f"ticket_{event}",
+        title=title,
+        message=message,
+        fallback_email=customer_email,
+        email_subject=email_subject,
+        email_body=email_body,
+        recipient_type_for_email="customer",
+    )
+
+
 # ── Embedding helpers ─────────────────────────────────────────────────────────
 
 def _compute_ticket_embedding(ticket) -> list[float] | None:
-    """
-    Return ticket embedding as a plain Python list of floats.
-    Uses stored ticket_embedding if present, otherwise computes on the fly
-    using the module-level cached SentenceTransformer model.
-    """
     if ticket.ticket_embedding is not None:
         emb = ticket.ticket_embedding
         return list(emb) if not isinstance(emb, list) else emb
-
     try:
         model = _get_embedding_model()
         text  = f"{ticket.title or ''} {ticket.description or ''}".strip()
@@ -591,30 +875,19 @@ def _score_member(
     ticket_embedding: list[float] | None,
     workload: int,
 ) -> float:
-    """
-    Composite score:
-      skill_score  cosine similarity ticket ↔ member skill embedding  weight=0.5
-      exp_score    experience normalised to [0,1], capped at 10 yrs   weight=0.2
-      load_score   inverse workload normalised to [0,1]                weight=0.3
-    """
+    """skill(0.4) + exp(0.2) + load(0.4)"""
     skill_score = 0.0
     if ticket_embedding is not None and member.skill_embedding is not None:
         skill_score = max(
             0.0,
-            _cosine_similarity(
-                list(ticket_embedding),
-                list(member.skill_embedding),
-            ),
+            _cosine_similarity(list(ticket_embedding), list(member.skill_embedding)),
         )
-
     exp_score  = min((member.experience or 0) / 10.0, 1.0)
     load_score = max(0.0, 1.0 - (workload / 20.0))
-
-    return (skill_score * 0.5) + (exp_score * 0.2) + (load_score * 0.3)
+    return (skill_score * 0.4) + (exp_score * 0.2) + (load_score * 0.4)
 
 
 async def _get_workload_map(session, members: list) -> dict[str, int]:
-    """Returns {user_id_str → open_ticket_count} for each member."""
     from src.data.models.postgres.models import Ticket
     from sqlalchemy import select, func
 
@@ -641,6 +914,16 @@ async def _safe_fetch_email(user_id) -> str | None:
         return None
 
 
+async def _safe_fetch_email_str(actor_id: str) -> str | None:
+    try:
+        from src.core.celery.utils import fetch_user_email
+        import uuid as _uuid
+        return await fetch_user_email(_uuid.UUID(actor_id))
+    except Exception as exc:
+        logger.warning("fetch_email_failed", actor_id=actor_id, error=str(exc))
+        return None
+
+
 def _ticket_payload(ticket, reason: str) -> dict:
     return {
         "ticket_id":     str(ticket.id),
@@ -651,123 +934,3 @@ def _ticket_payload(ticket, reason: str) -> dict:
         "status":        ticket.status,
         "reason":        reason,
     }
-
-
-def _fire_agent_email(ticket, member, agent_name: str) -> None:
-    try:
-        from src.core.celery.workers.email_worker import send_notification_email
-
-        sla_response = (
-            ticket.sla_response_due.strftime("%Y-%m-%d %H:%M UTC")
-            if ticket.sla_response_due else "N/A"
-        )
-        sla_resolve = (
-            ticket.sla_resolve_due.strftime("%Y-%m-%d %H:%M UTC")
-            if ticket.sla_resolve_due else "N/A"
-        )
-
-        send_notification_email.delay(
-            recipient_id=str(member.user_id),
-            recipient_type="persona",
-            subject=f"[Ticketing Genie] New ticket assigned: {ticket.ticket_number}",
-            body=(
-                f"Hi {agent_name},\n\n"
-                f"A new ticket has been assigned to you.\n\n"
-                f"Ticket:      {ticket.ticket_number}\n"
-                f"Title:       {ticket.title}\n"
-                f"Priority:    {ticket.priority}\n"
-                f"Severity:    {ticket.severity}\n"
-                f"Tier:        {ticket.tier_snapshot or 'N/A'}\n"
-                f"Environment: {ticket.environment or 'N/A'}\n\n"
-                f"SLA Response due:   {sla_response}\n"
-                f"SLA Resolution due: {sla_resolve}\n\n"
-                f"Please respond to the customer within your SLA window.\n\n"
-                f"— Ticketing Genie"
-            ),
-        )
-    except Exception as exc:
-        logger.warning("agent_email_fire_failed", error=str(exc))
-
-
-def _fire_customer_assignment_email(
-    ticket, agent_name: str, customer_email: str | None
-) -> None:
-    if not customer_email:
-        return
-    try:
-        from src.core.celery.workers.email_worker import send_notification_email
-
-        sla_response = (
-            ticket.sla_response_due.strftime("%Y-%m-%d %H:%M UTC")
-            if ticket.sla_response_due else "N/A"
-        )
-
-        override_line = ""
-        if ticket.priority_overridden and ticket.override_reason:
-            override_line = (
-                f"\nNote: Your reported severity was reviewed by our system. "
-                f"Priority has been set to {ticket.priority}.\n"
-                f"Reason: {ticket.override_reason}\n"
-            )
-
-        send_notification_email.delay(
-            recipient_id=str(ticket.customer_id),
-            recipient_type="customer",
-            subject=f"[{ticket.ticket_number}] Agent assigned — we're on it",
-            body=(
-                f"Dear Customer,\n\n"
-                f"Your ticket {ticket.ticket_number} has been assigned to our support agent.\n\n"
-                f"Agent:                {agent_name}\n"
-                f"Priority:             {ticket.priority}\n"
-                f"Severity:             {ticket.severity}\n"
-                f"Expected response by: {sla_response}\n"
-                f"{override_line}\n"
-                f"Our agent will reach out to you shortly. "
-                f"You can track your ticket status in the portal.\n\n"
-                f"— Ticketing Genie Support Team"
-            ),
-            recipient_email=customer_email,
-        )
-    except Exception as exc:
-        logger.warning("customer_assignment_email_failed", error=str(exc))
-
-
-def _fire_customer_pending_email(ticket, customer_email: str | None) -> None:
-    if not customer_email:
-        return
-    try:
-        from src.core.celery.workers.email_worker import send_notification_email
-
-        sla_response = (
-            ticket.sla_response_due.strftime("%Y-%m-%d %H:%M UTC")
-            if ticket.sla_response_due else "N/A"
-        )
-
-        override_line = ""
-        if ticket.priority_overridden and ticket.override_reason:
-            override_line = (
-                f"\nNote: Your reported severity was reviewed by our system. "
-                f"Priority has been set to {ticket.priority}.\n"
-                f"Reason: {ticket.override_reason}\n"
-            )
-
-        send_notification_email.delay(
-            recipient_id=str(ticket.customer_id),
-            recipient_type="customer",
-            subject=f"[{ticket.ticket_number}] Your ticket is being reviewed",
-            body=(
-                f"Dear Customer,\n\n"
-                f"Your ticket {ticket.ticket_number} has been received and is currently "
-                f"being reviewed by our team lead for assignment.\n\n"
-                f"Priority:             {ticket.priority}\n"
-                f"Severity:             {ticket.severity}\n"
-                f"Expected response by: {sla_response}\n"
-                f"{override_line}\n"
-                f"An agent will be assigned shortly and will reach out to you. "
-                f"You can track your ticket status in the portal.\n\n"
-                f"— Ticketing Genie Support Team"
-            ),
-            recipient_email=customer_email,
-        )
-    except Exception as exc:
-        logger.warning("customer_pending_email_failed", error=str(exc))

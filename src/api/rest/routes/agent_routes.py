@@ -12,7 +12,7 @@ from src.api.rest.dependencies import CurrentActor, ROLE_AGENT, require_role
 from src.core.services.agent_services import AgentService
 from src.core.sse.sse_manager import sse_manager
 from src.data.clients.postgres_client import get_db_session
-from src.schemas.ticket_schema import TicketQueueItem, StatusUpdateRequest, TicketDetailResponse
+from src.schemas.ticket_schema import TicketQueueItem, StatusUpdateRequest, TicketDetailResponse, UnassignRequest
 from fastapi import HTTPException
 router = APIRouter(tags=["Agent — Queue"])
 
@@ -141,3 +141,29 @@ async def get_agent_tickets(
 ) -> list[TicketQueueItem]:
     tickets = await service.get_agent_queue(actor.actor_id)
     return [TicketQueueItem.model_validate(t) for t in tickets]
+
+@router.patch(
+    "/agent/tickets/{ticket_id}/unassign",
+    summary="Agent — self-unassign a ticket with justification",
+)
+async def unassign_agent_ticket(
+    ticket_id: str,
+    payload: UnassignRequest,
+    actor: CurrentActor = _AgentActor,
+    service: AgentService = Depends(_agent_svc),
+):
+    """
+    Agent unassigns themselves from a ticket.
+    Ticket reverts to 'new' status and appears in TL unassigned queue.
+    Justification is saved as an internal note on the ticket.
+    SSE push fires to team lead immediately.
+    """
+    try:
+        ticket = await service.unassign_ticket(
+            agent_id=actor.actor_id,
+            ticket_id=ticket_id,
+            justification=payload.justification,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return TicketDetailResponse.model_validate(ticket)

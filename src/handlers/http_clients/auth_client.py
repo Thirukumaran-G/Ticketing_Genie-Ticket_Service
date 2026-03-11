@@ -103,3 +103,32 @@ class AuthHttpClient:
     async def get_customer_email(self, customer_id: str) -> str | None:
         """Alias used by EmailClient.resolve_email."""
         return await self.get_user_email(customer_id)
+
+    async def get_tiers(self, token: str) -> list[dict]:
+        """GET /api/v1/admin/tiers — list tiers from auth-service."""
+        url = f"{self._base_url}/api/v1/admin/tiers"
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
+            if resp.status_code == 200:
+                return resp.json()
+            logger.warning("auth_get_tiers_failed", status=resp.status_code)
+            return []
+        except Exception as exc:
+            logger.error("auth_get_tiers_error", error=str(exc))
+            return []
+
+    async def get_products(self, token: str) -> list[dict]:
+        """GET /api/v1/admin/products — list products from auth-service."""
+        url = f"{self._base_url}/api/v1/admin/products"
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
+            if resp.status_code == 200:
+                return resp.json()
+            logger.warning("auth_get_products_failed", status=resp.status_code)
+            return []
+        except Exception as exc:
+            logger.error("auth_get_products_error", error=str(exc))
+            return []
+
