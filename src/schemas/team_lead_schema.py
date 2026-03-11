@@ -75,3 +75,35 @@ class TLTicketDetailResponse(BaseModel):
     closed_at:             Optional[datetime]
     created_at:            datetime
     updated_at:            datetime
+
+class ConversationItem(BaseModel):
+    id: str
+    ticket_id: str
+    author_id: str
+    author_type: str
+    content: str
+    is_internal: bool
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class AttachmentItem(BaseModel):
+    id: str
+    ticket_id: str
+    file_name: str
+    file_size: Optional[int] = None
+    mime_type: Optional[str] = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class TLTicketThreadResponse(BaseModel):
+    conversations: list[ConversationItem]
+    attachments: list[AttachmentItem]
+
+
+class TLInternalNoteRequest(BaseModel):
+    content: str

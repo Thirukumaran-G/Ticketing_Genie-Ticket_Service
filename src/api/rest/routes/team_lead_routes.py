@@ -1,15 +1,6 @@
 """
 Team Lead routes.
 src/api/rest/routes/team_lead_routes.py
-
-Endpoints:
-  GET  /teamlead/queue                          — unassigned tickets (initial load)
-  GET  /teamlead/queue/stream                   — SSE stream (real-time push)
-  GET  /teamlead/tickets                        — all team tickets (filterable by status)
-  GET  /teamlead/tickets/{ticket_id}            — single ticket detail
-  POST /teamlead/tickets/{ticket_id}/assign     — manually assign to agent
-  PATCH /teamlead/tickets/{ticket_id}/status    — update ticket status
-  GET  /teamlead/overview                       — team overview + agent workloads
 """
 
 from __future__ import annotations
@@ -18,7 +9,7 @@ import asyncio
 import json
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,6 +26,8 @@ from src.schemas.team_lead_schema import (
     TeamOverviewResponse,
     TicketStatusUpdateRequest,
     TLTicketDetailResponse,
+    TLTicketThreadResponse,
+    TLInternalNoteRequest,
 )
 from src.schemas.ticket_schema import TicketQueueItem
 
@@ -47,12 +40,12 @@ def _tl_svc(session: AsyncSession = Depends(get_db_session)) -> TeamLeadService:
     return TeamLeadService(session)
 
 
-# ── Unassigned queue — initial load ──────────────────────────────────────────
+# ── Unassigned queue ──────────────────────────────────────────────────────────
 
 @router.get(
     "/queue",
     response_model=list[TicketQueueItem],
-    summary="Unassigned tickets routed to your team (initial load)",
+    summary="Unassigned tickets across all product teams (initial load)",
 )
 async def get_tl_queue(
     actor: CurrentActor = _TLActor,
@@ -72,12 +65,6 @@ async def get_tl_queue(
 async def tl_queue_stream(
     actor: CurrentActor = _TLActor,
 ) -> StreamingResponse:
-    """
-    Events:
-      event: queue_update   → new unassigned ticket routed to team
-                              OR auto-assign threshold not met
-      : keepalive           → every 30s
-    """
     async def _stream():
         async with sse_manager.subscribe(actor.actor_id) as q:
             while True:
@@ -107,12 +94,12 @@ async def tl_queue_stream(
 @router.get(
     "/tickets",
     response_model=list[TLTicketDetailResponse],
-    summary="All tickets for your team — optionally filter by status",
+    summary="All tickets handled by your team members — optionally filter by status",
 )
 async def get_team_tickets(
     status: Optional[str] = Query(
         None,
-        description="Filter by status: new | open | in_progress | resolved | closed",
+        description="Filter by status: new | open | in_progress | on_hold | resolved | closed",
     ),
     actor: CurrentActor = _TLActor,
     service: TeamLeadService = Depends(_tl_svc),
@@ -126,7 +113,7 @@ async def get_team_tickets(
 @router.get(
     "/tickets/{ticket_id}",
     response_model=TLTicketDetailResponse,
-    summary="Full detail of a single ticket in your team",
+    summary="Full detail of a single ticket handled by your team",
 )
 async def get_ticket_detail(
     ticket_id: str,
@@ -142,7 +129,7 @@ async def get_ticket_detail(
 @router.post(
     "/tickets/{ticket_id}/assign",
     response_model=TLTicketDetailResponse,
-    summary="Manually assign a ticket to an agent in your team",
+    summary="Manually assign a ticket to a team member",
 )
 async def manual_assign(
     ticket_id: str,
@@ -150,11 +137,6 @@ async def manual_assign(
     actor: CurrentActor = _TLActor,
     service: TeamLeadService = Depends(_tl_svc),
 ) -> TLTicketDetailResponse:
-    """
-    TL picks an agent manually from the unassigned queue.
-    Fires SSE push to agent immediately.
-    Fires in-app notification to agent.
-    """
     ticket = await service.manual_assign(ticket_id, payload, actor.actor_id)
     return TLTicketDetailResponse.model_validate(ticket)
 
@@ -181,16 +163,63 @@ async def update_ticket_status(
 @router.get(
     "/overview",
     response_model=TeamOverviewResponse,
-    summary="Team overview — agent workloads + unassigned ticket count",
+    summary="Team overview — all members' workloads + unassigned count across all products",
 )
 async def get_team_overview(
     actor: CurrentActor = _TLActor,
     service: TeamLeadService = Depends(_tl_svc),
 ) -> TeamOverviewResponse:
-    """
-    Returns:
-      - team name, product_id
-      - unassigned ticket count
-      - each agent's open ticket count + experience + skills
-    """
     return await service.get_team_overview(actor.actor_id)
+
+
+# ── Ticket thread ─────────────────────────────────────────────────────────────
+
+@router.get(
+    "/tickets/{ticket_id}/thread",
+    response_model=TLTicketThreadResponse,
+    summary="View full conversation thread for a ticket",
+)
+async def get_tl_ticket_thread(
+    ticket_id: str,
+    actor: CurrentActor = _TLActor,
+    service: TeamLeadService = Depends(_tl_svc),
+) -> TLTicketThreadResponse:
+    try:
+        data = await service.get_ticket_thread(ticket_id, actor.actor_id)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return TLTicketThreadResponse(
+        conversations=data["conversations"],
+        attachments=data["attachments"],
+    )
+
+
+# ── Internal note ─────────────────────────────────────────────────────────────
+
+@router.post(
+    "/tickets/{ticket_id}/note",
+    summary="Add an internal note to a ticket (never visible to customer)",
+)
+async def add_tl_internal_note(
+    ticket_id: str,
+    payload: TLInternalNoteRequest,
+    actor: CurrentActor = _TLActor,
+    service: TeamLeadService = Depends(_tl_svc),
+):
+    try:
+        note = await service.add_internal_note(
+            ticket_id=ticket_id,
+            content=payload.content,
+            lead_user_id=actor.actor_id,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return {
+        "id":          str(note.id),
+        "ticket_id":   str(note.ticket_id),
+        "author_id":   str(note.author_id),
+        "author_type": note.author_type,
+        "content":     note.content,
+        "is_internal": note.is_internal,
+        "created_at":  note.created_at,
+    }

@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
-
+import uuid
 
 # ── Customer — Create Ticket ──────────────────────────────────────────────────
 
@@ -95,22 +95,40 @@ class TicketQueueItem(BaseModel):
     created_at:       datetime
 
 
-class TicketDetailResponse(TicketQueueItem):
-    description:              Optional[str]
-    customer_id:              uuid.UUID
-    company_id:               Optional[uuid.UUID]
-    source:                   Optional[str]
-    environment:              Optional[str]
-    customer_priority:        Optional[str]
-    priority_overridden:      bool
-    override_reason:          Optional[str]
-    ai_draft:                 Optional[str]
-    first_response_at:        Optional[datetime]
-    sla_breached_at:          Optional[datetime]
-    response_sla_breached_at: Optional[datetime]
-    reopen_count:             int
-    resolved_at:              Optional[datetime]
-    closed_at:                Optional[datetime]
+class TicketDetailResponse(BaseModel):
+    id: uuid.UUID
+    ticket_number: str
+    title: Optional[str] = None
+    description: Optional[str] = None
+    status: str
+    severity: Optional[str] = None
+    priority: Optional[str] = None
+    source: Optional[str] = None
+    environment: Optional[str] = None
+    customer_id: uuid.UUID
+    assigned_to: Optional[uuid.UUID] = None
+    team_id: Optional[uuid.UUID] = None
+    tier_snapshot: Optional[str] = None
+    customer_priority: Optional[str] = None
+    priority_overridden: bool = False
+    override_reason: Optional[str] = None
+    ai_draft: Optional[str] = None
+    reopen_count: int = 0
+    first_response_at: Optional[datetime] = None
+    resolved_at: Optional[datetime] = None
+    closed_at: Optional[datetime] = None
+    sla_response_due: Optional[datetime] = None
+    sla_resolve_due: Optional[datetime] = None
+    response_sla_breached_at: Optional[datetime] = None
+    sla_breached_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class UnassignRequest(BaseModel):
+    justification: str
 
 
 # ── Notification ──────────────────────────────────────────────────────────────
