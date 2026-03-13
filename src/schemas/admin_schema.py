@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import uuid
-from typing import Optional
+from typing import Optional, List
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # ── Email Config ──────────────────────────────────────────────────────────────
 
 class EmailConfigUpdateRequest(BaseModel):
     key:       str  = Field(..., examples=["IMAP_USER", "IMAP_PASSWORD"])
+    value:     str
+    is_secret: bool = False
+
+class EmailConfigCreateRequest(BaseModel):
+    key:       str
     value:     str
     is_secret: bool = False
 
@@ -64,8 +69,9 @@ class SeverityPriorityMapResponse(BaseModel):
 # ── Keyword Rules ─────────────────────────────────────────────────────────────
 
 class KeywordRuleCreateRequest(BaseModel):
-    keyword:  str = Field(..., max_length=100)
-    severity: str = Field(..., examples=["critical", "high", "medium", "low"])
+    keyword:    str
+    severity:   str
+    product_id: uuid.UUID
 
 
 class KeywordRuleUpdateRequest(BaseModel):
@@ -75,12 +81,13 @@ class KeywordRuleUpdateRequest(BaseModel):
 
 
 class KeywordRuleResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
+    id:         uuid.UUID
+    keyword:    str
+    severity:   str
+    is_active:  bool
+    product_id: Optional[uuid.UUID] = None
 
-    id:        uuid.UUID
-    keyword:   str
-    severity:  str
-    is_active: bool
+    model_config = ConfigDict(from_attributes=True)
 
 
 # ── Product Config ────────────────────────────────────────────────────────────
@@ -110,25 +117,6 @@ class TeamCreateRequest(BaseModel):
     team_lead_id: Optional[uuid.UUID]  = None
 
 
-class TeamResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id:           uuid.UUID
-    name:         str
-    product_id:   uuid.UUID
-    team_lead_id: Optional[uuid.UUID]
-    is_active:    bool
-
-
-class TeamMemberAddRequest(BaseModel):
-    user_id:    uuid.UUID
-    experience: Optional[int] = Field(None, ge=0)
-    skill_text: Optional[str] = Field(
-        None,
-        description="Free-text skill description — auto-embedded.",
-    )
-
-
 class TeamMemberResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -138,6 +126,32 @@ class TeamMemberResponse(BaseModel):
     experience: Optional[int]
     skills:     Optional[dict]
     is_active:  bool
+
+
+class TeamResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id:           uuid.UUID
+    name:         str
+    product_id:   uuid.UUID
+    team_lead_id: Optional[uuid.UUID]
+    is_active:    bool
+    member_count: int = 0                        # ← derived from loaded members
+    members:      List[TeamMemberResponse] = []  # ← full member list
+
+    @model_validator(mode="after")
+    def set_member_count(self) -> "TeamResponse":
+        self.member_count = len(self.members)
+        return self
+
+
+class TeamMemberAddRequest(BaseModel):
+    user_id:    uuid.UUID
+    experience: Optional[int] = Field(None, ge=0)
+    skill_text: Optional[str] = Field(
+        None,
+        description="Free-text skill description — auto-embedded.",
+    )
 
 
 # ── Reports ───────────────────────────────────────────────────────────────────

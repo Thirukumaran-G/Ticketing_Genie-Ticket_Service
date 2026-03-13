@@ -1,8 +1,3 @@
-"""
-TicketRepository + NotificationRepository
-src/data/repositories/ticket_repository.py
-"""
-
 from __future__ import annotations
 
 import uuid
@@ -27,6 +22,7 @@ class TicketRepository:
         return ticket
 
     async def get_by_id(self, ticket_id: str) -> Optional[Ticket]:
+        """Fetch a ticket by ID only — no scope check."""
         r = await self._s.execute(
             select(Ticket).where(Ticket.id == uuid.UUID(ticket_id))
         )
@@ -49,12 +45,7 @@ class TicketRepository:
         limit: int = 50,
         offset: int = 0,
     ) -> list[Ticket]:
-        """All tickets belonging to this customer, newest first.
-
-        Optionally filter by status. Supports pagination via limit/offset.
-        Never exposes tickets from other customers — customer_id is always
-        enforced from the JWT, never from the request body.
-        """
+        """All tickets belonging to this customer, newest first."""
         q = (
             select(Ticket)
             .where(Ticket.customer_id == uuid.UUID(customer_id))
@@ -70,11 +61,7 @@ class TicketRepository:
         ticket_id: str,
         customer_id: str,
     ) -> Optional[Ticket]:
-        """Fetch a single ticket — only if it belongs to this customer.
-
-        Returns None (→ 404) if the ticket exists but belongs to someone else.
-        This prevents enumeration attacks where a customer guesses ticket UUIDs.
-        """
+        """Fetch a single ticket — only if it belongs to this customer."""
         r = await self._s.execute(
             select(Ticket).where(
                 Ticket.id == uuid.UUID(ticket_id),
@@ -102,17 +89,13 @@ class TicketRepository:
             .limit(limit)
         )
         return list(r.scalars().all())
-    
-    async def get_by_id_and_agent(
-    self,
-    ticket_id: str,
-    agent_id: str,
-) -> Optional[Ticket]:
-        """Fetch a single ticket — only if it is assigned to this agent.
 
-        Returns None (→ 404) if the ticket exists but belongs to someone else.
-        Mirrors get_by_id_and_customer to prevent cross-agent enumeration.
-        """
+    async def get_by_id_and_agent(
+        self,
+        ticket_id: str,
+        agent_id: str,
+    ) -> Optional[Ticket]:
+        """Fetch a single ticket — only if it is assigned to this agent."""
         r = await self._s.execute(
             select(Ticket).where(
                 Ticket.id == uuid.UUID(ticket_id),
@@ -120,7 +103,6 @@ class TicketRepository:
             )
         )
         return r.scalar_one_or_none()
-
 
     # ── Team lead queue — unassigned tickets for team ─────────────────────────
 
@@ -170,22 +152,15 @@ class TicketRepository:
         r = await self._s.execute(select(func.count()).select_from(Ticket))
         count = r.scalar() or 0
         return f"TKT-{count + 1:06d}"
-    
+
     async def unassign_ticket(self, ticket_id: str) -> None:
         """Clear assigned_to and reset status to new."""
-        await self._session.execute(
+        await self._s.execute(                         
             update(Ticket)
             .where(Ticket.id == uuid.UUID(ticket_id))
             .values(assigned_to=None, status="new")
         )
-        await self._session.flush()
-
-    async def get_by_id(self, ticket_id: str) -> Optional[Ticket]:
-        """Fetch a ticket by ID only — no agent scope check."""
-        r = await self._session.execute(
-            select(Ticket).where(Ticket.id == uuid.UUID(ticket_id))
-        )
-        return r.scalar_one_or_none()
+        await self._s.flush()                          
 
 
 class NotificationRepository:
