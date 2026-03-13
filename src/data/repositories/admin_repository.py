@@ -1,3 +1,4 @@
+# ticket service repository 
 from __future__ import annotations
 
 import uuid
@@ -8,6 +9,7 @@ from sqlalchemy import select, update
 from sqlalchemy import select as sa_select
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from src.data.models.postgres.models import (
     EmailConfig,
@@ -71,6 +73,25 @@ class EmailConfigRepository:
         await self._session.refresh(config)
         return config
 
+    async def delete_email_config(self, key: str) -> None:
+        from sqlalchemy import delete
+        await self._session.execute(
+            delete(EmailConfig).where(EmailConfig.key == key)
+        )
+        await self._session.flush()
+
+    async def create_email_config(self, key: str, value: str, is_secret: bool, updated_by: str) -> EmailConfig:
+        config = EmailConfig(
+            key=key,
+            value=value,
+            is_secret=is_secret,
+            updated_by=uuid.UUID(updated_by),
+        )
+        self._session.add(config)
+        await self._session.flush()
+        await self._session.refresh(config)
+        return config
+
 
 # ── SLA Rule ──────────────────────────────────────────────────────────────────
 
@@ -103,11 +124,10 @@ class SLARuleRepository:
         )
         return result.scalar_one_or_none()
 
-    async def deactivate(self, rule_id: str) -> None:
+    async def hard_delete_sla_rule(self, rule_id: str) -> None:
+        from sqlalchemy import delete
         await self._session.execute(
-            update(SLARule)
-            .where(SLARule.id == uuid.UUID(rule_id))
-            .values(is_active=False)
+            delete(SLARule).where(SLARule.id == uuid.UUID(rule_id))
         )
         await self._session.flush()
 
@@ -149,6 +169,13 @@ class SeverityPriorityMapRepository:
             await self._session.delete(mapping)
             await self._session.flush()
 
+    async def hard_delete_severity_priority_map(self, map_id: str) -> None:
+        from sqlalchemy import delete
+        await self._session.execute(
+            delete(SeverityPriorityMap).where(SeverityPriorityMap.id == uuid.UUID(map_id))
+        )
+        await self._session.flush()
+
 
 # ── Keyword Rule ──────────────────────────────────────────────────────────────
 
@@ -177,11 +204,10 @@ class KeywordRuleRepository:
         )
         return result.scalar_one_or_none()
 
-    async def deactivate(self, rule_id: str) -> None:
+    async def hard_delete_keyword_rule(self, rule_id: str) -> None:
+        from sqlalchemy import delete
         await self._session.execute(
-            update(KeywordRule)
-            .where(KeywordRule.id == uuid.UUID(rule_id))
-            .values(is_active=False)
+            delete(KeywordRule).where(KeywordRule.id == uuid.UUID(rule_id))
         )
         await self._session.flush()
 
@@ -207,11 +233,10 @@ class ProductConfigRepository:
         )
         return result.scalar_one_or_none()
 
-    async def deactivate_by_product_id(self, product_id: str) -> None:
+    async def hard_delete_product_config(self, product_id: str) -> None:
+        from sqlalchemy import delete
         await self._session.execute(
-            update(ProductConfig)
-            .where(ProductConfig.product_id == uuid.UUID(product_id))
-            .values(is_active=False)
+            delete(ProductConfig).where(ProductConfig.product_id == uuid.UUID(product_id))
         )
         await self._session.flush()
 
@@ -225,7 +250,10 @@ class TeamRepository:
 
     async def list_active(self) -> List[Team]:
         result = await self._session.execute(
-            select(Team).where(Team.is_active == True).order_by(Team.name)
+            select(Team)
+            .options(selectinload(Team.members))   # ← FIX: eager load members
+            .where(Team.is_active == True)
+            .order_by(Team.name)
         )
         return list(result.scalars().all())
 
@@ -237,7 +265,9 @@ class TeamRepository:
 
     async def list_by_product(self, product_id: str) -> List[Team]:
         result = await self._session.execute(
-            select(Team).where(
+            select(Team)
+            .options(selectinload(Team.members))   # ← FIX: eager load members
+            .where(
                 Team.product_id == uuid.UUID(product_id),
                 Team.is_active  == True,
             )
@@ -271,6 +301,13 @@ class TeamMemberRepository:
             update(TeamMember)
             .where(TeamMember.id == uuid.UUID(member_id))
             .values(is_active=False)
+        )
+        await self._session.flush()
+    
+    async def hard_delete(self, member_id: str) -> None:
+        from sqlalchemy import delete
+        await self._session.execute(
+            delete(TeamMember).where(TeamMember.id == uuid.UUID(member_id))
         )
         await self._session.flush()
 

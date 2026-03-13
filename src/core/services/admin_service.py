@@ -1,3 +1,4 @@
+# Ticket service 
 from __future__ import annotations
 
 import uuid
@@ -90,6 +91,38 @@ class AdminService:
         await self._session.commit()
         logger.info("email_config_upserted", count=len(results), admin_id=admin_id)
         return results
+    
+    async def delete_email_config(self, key: str, admin_id: str) -> None:
+        configs = await self._email_repo.list_all()
+        existing = next((c for c in configs if c.key == key), None)
+        if not existing:
+            raise NotFoundException(f"Email config key '{key}' not found.")
+        if key in _SYSTEM_ONLY_KEYS:
+            raise ConflictException(f"Key '{key}' is system-only and cannot be deleted.")
+        await self._email_repo.delete_email_config(key)
+        await self._session.commit()
+        logger.info("email_config_deleted", key=key, admin_id=admin_id)
+
+    async def create_email_config(
+    self,
+    key: str,
+    value: str,
+    is_secret: bool,
+    admin_id: str,
+) -> EmailConfig:   
+        configs = await self._email_repo.list_all()
+        existing = next((c for c in configs if c.key == key), None)
+        if existing:
+            raise ConflictException(f"Key '{key}' already exists. Use upsert to update.")
+        config = await self._email_repo.create_email_config(
+            key=key,
+            value=value,
+            is_secret=is_secret,
+            updated_by=admin_id,
+        )
+        await self._session.commit()
+        logger.info("email_config_created", key=key, admin_id=admin_id)
+        return config
 
     # ── SLA Rules ─────────────────────────────────────────────────────────────
 
@@ -156,22 +189,13 @@ class AdminService:
         logger.info("sla_rule_created", rule_id=str(rule.id))
         return rule
 
-    async def deactivate_sla_rule(self, rule_id: str, admin_id: str) -> None:
+    async def hard_delete_sla_rule(self, rule_id: str, admin_id: str) -> None:
         rule = await self._sla_repo.get_by_id(rule_id)
         if not rule:
             raise NotFoundException(f"SLA rule {rule_id} not found.")
-        await self._sla_repo.deactivate(rule_id)
-        await audit_service.log(
-            entity_type="sla_rule",
-            entity_id=rule.id,
-            action="sla_rule_deactivated",
-            actor_id=uuid.UUID(admin_id),
-            actor_type="user",
-            old_value={"is_active": True},
-            new_value={"is_active": False},
-        )
+        await self._sla_repo.hard_delete_sla_rule(rule_id)
         await self._session.commit()
-        logger.info("sla_rule_deactivated", rule_id=rule_id)
+        logger.info("sla_rule_hard_deleted", rule_id=rule_id)
 
     # ── Severity Priority Map ─────────────────────────────────────────────────
 
@@ -225,27 +249,13 @@ class AdminService:
         await self._session.commit()
         return mapping
 
-    async def delete_severity_priority_map(
-        self, map_id: str, admin_id: str
-    ) -> None:
+    async def hard_delete_severity_priority_map(self, map_id: str, admin_id: str) -> None:
         mapping = await self._sev_repo.get_by_id(map_id)
         if not mapping:
             raise NotFoundException(f"Severity priority map {map_id} not found.")
-        await self._sev_repo.delete(map_id)
-        await audit_service.log(
-            entity_type="severity_priority_map",
-            entity_id=mapping.id,
-            action="severity_priority_map_deleted",
-            actor_id=uuid.UUID(admin_id),
-            actor_type="user",
-            old_value={
-                "severity":         mapping.severity,
-                "tier_id":          str(mapping.tier_id),
-                "derived_priority": mapping.derived_priority,
-            },
-        )
+        await self._sev_repo.hard_delete_severity_priority_map(map_id)
         await self._session.commit()
-        logger.info("severity_priority_map_deleted", map_id=map_id)
+        logger.info("severity_priority_map_hard_deleted", map_id=map_id)
 
     # ── Keyword Rules ─────────────────────────────────────────────────────────
 
@@ -253,14 +263,15 @@ class AdminService:
         return await self._kw_repo.list_active()
 
     async def create_keyword_rule(
-        self, payload: KeywordRuleCreateRequest, admin_id: str
-    ) -> KeywordRule:
+    self, payload: KeywordRuleCreateRequest, admin_id: str
+) -> KeywordRule:
         existing = await self._kw_repo.get_by_keyword(payload.keyword)
         if existing and existing.is_active:
             raise ConflictException(f"Keyword '{payload.keyword}' already exists.")
         rule = KeywordRule(
             keyword=payload.keyword,
             severity=payload.severity,
+            product_id=payload.product_id,  # ← add this
             created_by=uuid.UUID(admin_id),
         )
         self._session.add(rule)
@@ -272,7 +283,7 @@ class AdminService:
             action="keyword_rule_created",
             actor_id=uuid.UUID(admin_id),
             actor_type="user",
-            new_value={"keyword": payload.keyword, "severity": payload.severity},
+            new_value={"keyword": payload.keyword, "severity": payload.severity, "product_id": str(payload.product_id)},
         )
         await self._session.commit()
         logger.info("keyword_rule_created", rule_id=str(rule.id))
@@ -315,22 +326,13 @@ class AdminService:
             logger.info("keyword_rule_updated", rule_id=rule_id, fields=changed_fields)
         return rule
 
-    async def deactivate_keyword_rule(self, rule_id: str, admin_id: str) -> None:
+    async def hard_delete_keyword_rule(self, rule_id: str, admin_id: str) -> None:
         rule = await self._kw_repo.get_by_id(rule_id)
         if not rule:
             raise NotFoundException(f"Keyword rule {rule_id} not found.")
-        await self._kw_repo.deactivate(rule_id)
-        await audit_service.log(
-            entity_type="keyword_rule",
-            entity_id=rule.id,
-            action="keyword_rule_deactivated",
-            actor_id=uuid.UUID(admin_id),
-            actor_type="user",
-            old_value={"is_active": True},
-            new_value={"is_active": False},
-        )
+        await self._kw_repo.hard_delete_keyword_rule(rule_id)
         await self._session.commit()
-        logger.info("keyword_rule_deactivated", rule_id=rule_id)
+        logger.info("keyword_rule_hard_deleted", rule_id=rule_id)
 
     # ── Product Config ────────────────────────────────────────────────────────
 
@@ -393,26 +395,13 @@ class AdminService:
         logger.info("product_config_created", config_id=str(config.id))
         return config
 
-    async def deactivate_product_config(
-        self, product_id: str, admin_id: str
-    ) -> None:
+    async def hard_delete_product_config(self, product_id: str, admin_id: str) -> None:
         existing = await self._product_config_repo.get_by_product_id(product_id)
         if not existing:
-            raise NotFoundException(
-                f"ProductConfig for product {product_id} not found."
-            )
-        await self._product_config_repo.deactivate_by_product_id(product_id)
-        await audit_service.log(
-            entity_type="product_config",
-            entity_id=existing.id,
-            action="product_config_deactivated",
-            actor_id=uuid.UUID(admin_id),
-            actor_type="user",
-            old_value={"is_active": True},
-            new_value={"is_active": False},
-        )
+            raise NotFoundException(f"ProductConfig for product {product_id} not found.")
+        await self._product_config_repo.hard_delete_product_config(product_id)
         await self._session.commit()
-        logger.info("product_config_deactivated", product_id=product_id)
+        logger.info("product_config_hard_deleted", product_id=product_id)
 
     # ── Reports ───────────────────────────────────────────────────────────────
 
@@ -429,6 +418,137 @@ class AdminService:
                 {"priority": row.priority or "unset", "count": row.count}
                 for row in result.all()
             ]
+        }
+    
+    # ─── NEW REPORT METHODS ───────────────────────────────────────────────────────
+
+    async def report_tickets_by_severity(self) -> dict:
+        from sqlalchemy import func, select
+        from src.data.models.postgres.models import Ticket
+        rows = await self._session.execute(
+            select(Ticket.severity, func.count(Ticket.id).label("count"))
+            .group_by(Ticket.severity)
+        )
+        return {"tickets_by_severity": [{"severity": r.severity, "count": r.count} for r in rows]}
+
+    async def report_tickets_by_status(self) -> dict:
+        from sqlalchemy import func, select
+        from src.data.models.postgres.models import Ticket
+        rows = await self._session.execute(
+            select(Ticket.status, func.count(Ticket.id).label("count"))
+            .group_by(Ticket.status)
+        )
+        return {"tickets_by_status": [{"status": r.status, "count": r.count} for r in rows]}
+
+    async def report_avg_resolution_time(self) -> dict:
+        from sqlalchemy import func, select
+        from src.data.models.postgres.models import Ticket
+        result = await self._session.execute(
+            select(
+                func.avg(
+                    func.extract("epoch", Ticket.resolved_at - Ticket.created_at)
+                ).label("avg_seconds"),
+                func.min(
+                    func.extract("epoch", Ticket.resolved_at - Ticket.created_at)
+                ).label("min_seconds"),
+                func.max(
+                    func.extract("epoch", Ticket.resolved_at - Ticket.created_at)
+                ).label("max_seconds"),
+            ).where(Ticket.resolved_at.isnot(None))
+        )
+        row = result.fetchone()
+        return {
+            "avg_resolution_time_min": round((row.avg_seconds or 0) / 60, 1),
+            "min_resolution_time_min": round((row.min_seconds or 0) / 60, 1),
+            "max_resolution_time_min": round((row.max_seconds or 0) / 60, 1),
+        }
+
+    async def report_sla_breach_by_severity(self) -> dict:
+        from sqlalchemy import func, select
+        from src.data.models.postgres.models import Ticket
+        rows = await self._session.execute(
+            select(Ticket.severity, func.count(Ticket.id).label("breached"))
+            .where(Ticket.sla_breached_at.isnot(None))
+            .group_by(Ticket.severity)
+        )
+        return {"sla_breach_by_severity": [{"severity": r.severity, "breached": r.breached} for r in rows]}
+
+    async def report_tickets_created_by_day(self, days: int = 30) -> dict:
+        from sqlalchemy import cast, Date, func, select, text
+        from src.data.models.postgres.models import Ticket
+        rows = await self._session.execute(
+            select(
+                cast(Ticket.created_at, Date).label("day"),
+                func.count(Ticket.id).label("count"),
+            )
+            .where(Ticket.created_at >= func.now() - text(f"interval '{days} days'"))
+            .group_by(cast(Ticket.created_at, Date))
+            .order_by(cast(Ticket.created_at, Date))
+        )
+        return {"tickets_by_day": [{"day": str(r.day), "count": r.count} for r in rows]}
+
+    async def report_top_companies_by_tickets(self, limit: int = 10) -> dict:
+        from sqlalchemy import func, select
+        from src.data.models.postgres.models import Ticket
+        rows = await self._session.execute(
+            select(Ticket.company_id, func.count(Ticket.id).label("total"))
+            .where(Ticket.company_id.isnot(None))
+            .group_by(Ticket.company_id)
+            .order_by(func.count(Ticket.id).desc())
+            .limit(limit)
+        )
+        return {"top_companies": [{"company_id": str(r.company_id), "total": r.total} for r in rows]}
+    
+    async def report_dashboard_summary(self) -> dict:
+        """
+        Single aggregated summary for the admin dashboard.
+        Returns:
+          - open_ticket_count        : total open tickets (all non-terminal statuses)
+          - total_sla_breaches       : all-time breached tickets count
+          - avg_first_response_min   : average first-response time in minutes
+          - tickets_resolved_today   : tickets resolved today (UTC)
+        All from the ticket schema — no cross-service HTTP call needed.
+        """
+        from sqlalchemy import cast, Date, func, select
+        from src.data.models.postgres.models import Ticket
+
+        open_statuses = ("new", "acknowledged", "in_progress", "on_hold", "reopened")
+
+        # 1. open ticket count
+        open_res = await self._session.execute(
+            select(func.count(Ticket.id)).where(Ticket.status.in_(open_statuses))
+        )
+        open_count: int = open_res.scalar_one() or 0
+
+        # 2. total all-time SLA breaches
+        breach_res = await self._session.execute(
+            select(func.count(Ticket.id)).where(Ticket.sla_breached_at.isnot(None))
+        )
+        total_breaches: int = breach_res.scalar_one() or 0
+
+        # 3. avg first response time (minutes)
+        frt_res = await self._session.execute(
+            select(
+                func.avg(
+                    func.extract("epoch", Ticket.first_response_at - Ticket.created_at)
+                ).label("avg_seconds")
+            ).where(Ticket.first_response_at.isnot(None))
+        )
+        avg_seconds = frt_res.scalar_one() or 0
+
+        # 4. resolved today
+        today_res = await self._session.execute(
+            select(func.count(Ticket.id)).where(
+                cast(Ticket.resolved_at, Date) == func.current_date()
+            )
+        )
+        resolved_today: int = today_res.scalar_one() or 0
+
+        return {
+            "open_ticket_count":      open_count,
+            "total_sla_breaches":     total_breaches,
+            "avg_first_response_min": round((avg_seconds or 0) / 60, 1),
+            "tickets_resolved_today": resolved_today,
         }
 
     async def report_sla_breaches_by_day(self) -> dict:
@@ -447,6 +567,40 @@ class AdminService:
                 for row in result.all()
             ]
         }
+    
+    async def list_team_members(self, team_id: str) -> list:
+        from sqlalchemy import select
+        from src.data.models.postgres.models import TeamMember
+        import uuid as uuid_lib
+ 
+        try:
+            tid = uuid_lib.UUID(team_id)
+        except (ValueError, AttributeError):
+            return []
+ 
+        rows = await self._session.execute(
+            select(TeamMember).where(TeamMember.team_id == tid)
+        )
+        members = rows.scalars().all()
+ 
+        result = []
+        for m in members:
+            skills = m.skills if isinstance(m.skills, dict) else {}
+            skill_text = (
+                skills.get("skill_text", "")
+                or skills.get("text", "")
+                or ""
+            )
+            result.append({
+                "id":         str(m.id),
+                "team_id":    str(m.team_id),
+                "user_id":    str(m.user_id),
+                "experience": m.experience,
+                "skills":     skills,
+                "skill_text": skill_text,
+            })
+ 
+        return result
 
     async def report_first_response_time(self) -> dict:
         result = await self._session.execute(

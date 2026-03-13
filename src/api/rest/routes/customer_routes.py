@@ -109,3 +109,28 @@ async def get_my_ticket(
         customer_id=actor.actor_id,
     )
     return CustomerTicketDetailResponse.model_validate(ticket)
+
+@router.get(
+    "/tickets/{ticket_id}/agent",
+    summary="Get assigned agent name for a customer's ticket",
+    description=(
+        "Returns the display name of the agent assigned to this ticket. "
+        "Email and internal IDs are never exposed. Returns null if unassigned."
+    ),
+)
+async def get_ticket_agent(
+    ticket_id: str,
+    actor: CurrentActor = _CustomerActor,
+    service: TicketService = Depends(_ticket_svc),
+) -> dict:
+    ticket = await service.get_my_ticket(
+        ticket_id=ticket_id,
+        customer_id=actor.actor_id,
+    )
+    if not ticket.assigned_to:
+        return {"assigned": False, "agent_name": None}
+ 
+    info = await service.get_assigned_agent_name(str(ticket.assigned_to))
+    if not info:
+        return {"assigned": True, "agent_name": "Support Agent"}
+    return {"assigned": True, "agent_name": info.get("full_name", "Support Agent")}
