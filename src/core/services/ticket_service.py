@@ -182,3 +182,20 @@ class TicketService:
             logger.error("ai_classification_dispatch_failed", ticket_id=str(ticket.id), error=str(exc))
 
         logger.info("ticket_background_tasks_fired", ticket_id=str(ticket.id))
+
+
+    async def get_assigned_agent_name(self, agent_id: str) -> dict | None:
+        try:
+            from src.handlers.http_clients.auth_client import AuthHttpClient
+            auth = AuthHttpClient()
+            user = await auth.get_user_by_id(agent_id)
+            if not user:
+                return None
+            return {
+                "full_name": user.get("full_name") or "Support Agent",
+            }
+        except Exception as exc:
+            from src.observability.logging.logger import get_logger
+            logger = get_logger(__name__)
+            logger.error("get_assigned_agent_name_failed", agent_id=agent_id, error=str(exc))
+            return None

@@ -1,7 +1,3 @@
-"""
-ticket-service: src/handlers/http_clients/auth_client.py
-"""
-
 from __future__ import annotations
 
 import httpx
@@ -22,19 +18,6 @@ class AuthHttpClient:
     # ── Token validation ───────────────────────────────────────────────────────
 
     async def validate_token(self, token: str) -> dict | None:
-        """
-        POST /api/v1/auth/internal/validate
-
-        Returns:
-        {
-            "valid": true,
-            "actor_id": "uuid",
-            "role": "customer|agent|support_team_lead|admin",
-            "email": "user@example.com",
-            "customer_tier": "starter|standard|enterprise|null",
-            "customer_id": "uuid|null"
-        }
-        """
         url = f"{self._base_url}/api/v1/auth/internal/validate"
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
@@ -53,34 +36,6 @@ class AuthHttpClient:
     # ── User lookup ────────────────────────────────────────────────────────────
 
     async def get_user_by_id(self, user_id: str) -> dict | None:
-        """
-        GET /api/v1/auth/internal/users/{user_id}
-
-        Returns:
-        {
-            "id": "uuid",
-            "email": "user@example.com",
-            "full_name": "Jane Doe",
-            "role": "customer",
-            "is_active": true
-        }
-
-        ── Auth-service endpoint to add ─────────────────────────────────────────
-        @router.get("/internal/users/{user_id}")
-        async def get_user_internal(user_id: str, session: AsyncSession = Depends(get_db)):
-            user = await session.get(User, uuid.UUID(user_id))
-            if not user:
-                raise HTTPException(404)
-            role = await session.get(Role, user.role_id)
-            return {
-                "id":        str(user.id),
-                "email":     user.email,
-                "full_name": user.full_name,
-                "role":      role.name if role else None,
-                "is_active": user.is_active,
-            }
-        ─────────────────────────────────────────────────────────────────────────
-        """
         url = f"{self._base_url}/api/v1/auth/internal/users/{user_id}"
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:

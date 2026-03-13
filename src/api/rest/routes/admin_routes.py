@@ -1,3 +1,4 @@
+# admin routes ticket service
 from __future__ import annotations
 
 import uuid
@@ -25,6 +26,7 @@ from src.schemas.admin_schema import (
     TeamMemberAddRequest,
     TeamMemberResponse,
     TeamResponse,
+    EmailConfigCreateRequest
 )
 
 router = APIRouter(prefix="/admin", tags=["Admin — Configuration"])
@@ -92,6 +94,40 @@ async def upsert_email_config(
     configs = await service.upsert_email_config(payload, actor.actor_id)
     return [EmailConfigResponse.model_validate(c) for c in configs]
 
+@router.post(
+    "/email-config",
+    response_model=EmailConfigResponse,
+    status_code=201,
+    summary="Create a new email config entry",
+)
+async def create_email_config(
+    payload: EmailConfigCreateRequest,
+    actor:   CurrentActor = _AdminActor,
+    service: AdminService = Depends(_admin_svc),
+) -> EmailConfigResponse:
+    config = await service.create_email_config(
+        key=payload.key,
+        value=payload.value,
+        is_secret=payload.is_secret,
+        admin_id=actor.actor_id,
+    )
+    return EmailConfigResponse.model_validate(config)
+
+
+@router.delete(
+    "/email-config/{key}",
+    status_code=204,
+    response_class=Response,
+    response_model=None,
+    summary="Hard delete an email config entry",
+)
+async def delete_email_config(
+    key:     str,
+    actor:   CurrentActor = _AdminActor,
+    service: AdminService = Depends(_admin_svc),
+) -> None:
+    await service.delete_email_config(key, actor.actor_id)
+
 
 # ── SLA Rules ─────────────────────────────────────────────────────────────────
 
@@ -128,14 +164,14 @@ async def upsert_sla_rule(
     status_code=204,
     response_class=Response,
     response_model=None,
-    summary="Deactivate an SLA rule",
+    summary="Hard delete an SLA rule",
 )
-async def deactivate_sla_rule(
+async def delete_sla_rule(
     rule_id: uuid.UUID,
     actor:   CurrentActor = _AdminActor,
     service: AdminService = Depends(_admin_svc),
 ) -> None:
-    await service.deactivate_sla_rule(str(rule_id), actor.actor_id)
+    await service.hard_delete_sla_rule(str(rule_id), actor.actor_id)
 
 
 # ── Severity / Priority Map ───────────────────────────────────────────────────
@@ -173,14 +209,14 @@ async def upsert_severity_priority_map(
     status_code=204,
     response_class=Response,
     response_model=None,
-    summary="Delete a severity → priority mapping",
+    summary="Hard delete a severity → priority mapping",
 )
 async def delete_severity_priority_map(
     map_id:  uuid.UUID,
     actor:   CurrentActor = _AdminActor,
     service: AdminService = Depends(_admin_svc),
 ) -> None:
-    await service.delete_severity_priority_map(str(map_id), actor.actor_id)
+    await service.hard_delete_severity_priority_map(str(map_id), actor.actor_id)
 
 
 # ── Keyword Rules ─────────────────────────────────────────────────────────────
@@ -233,14 +269,14 @@ async def update_keyword_rule(
     status_code=204,
     response_class=Response,
     response_model=None,
-    summary="Deactivate a keyword rule",
+    summary="Hard delete a keyword rule",
 )
-async def deactivate_keyword_rule(
+async def delete_keyword_rule(
     rule_id: uuid.UUID,
     actor:   CurrentActor = _AdminActor,
     service: AdminService = Depends(_admin_svc),
 ) -> None:
-    await service.deactivate_keyword_rule(str(rule_id), actor.actor_id)
+    await service.hard_delete_keyword_rule(str(rule_id), actor.actor_id)
 
 
 # ── Product Config ────────────────────────────────────────────────────────────
@@ -280,14 +316,14 @@ async def upsert_product_config(
     status_code=204,
     response_class=Response,
     response_model=None,
-    summary="Deactivate product config",
+    summary="Hard delete product config",
 )
-async def deactivate_product_config(
+async def hard_delete_product_config(
     product_id: uuid.UUID,
     actor:      CurrentActor = _AdminActor,
     service:    AdminService = Depends(_admin_svc),
 ) -> None:
-    await service.deactivate_product_config(str(product_id), actor.actor_id)
+    await service.hard_delete_product_config(str(product_id), actor.actor_id)
 
 
 # ── Reports ───────────────────────────────────────────────────────────────────
@@ -335,6 +371,59 @@ async def report_tickets_by_product(
     service: AdminService = Depends(_admin_svc),
 ) -> dict:
     return await service.report_tickets_by_product(_get_token(request))
+
+@router.get(
+    "/reports/dashboard-summary",
+    summary="Aggregated dashboard summary stats",
+)
+async def report_dashboard_summary(
+    actor:   CurrentActor = _AdminActor,
+    service: AdminService = Depends(_admin_svc),
+) -> dict:
+    return await service.report_dashboard_summary()
+
+@router.get("/reports/tickets-by-severity", summary="Tickets grouped by severity")
+async def report_tickets_by_severity(
+    actor: CurrentActor = _AdminActor,
+    service: AdminService = Depends(_admin_svc),
+) -> dict:
+    return await service.report_tickets_by_severity()
+
+@router.get("/reports/tickets-by-status", summary="Tickets grouped by status")
+async def report_tickets_by_status(
+    actor: CurrentActor = _AdminActor,
+    service: AdminService = Depends(_admin_svc),
+) -> dict:
+    return await service.report_tickets_by_status()
+
+@router.get("/reports/avg-resolution-time", summary="Average resolution time stats")
+async def report_avg_resolution_time(
+    actor: CurrentActor = _AdminActor,
+    service: AdminService = Depends(_admin_svc),
+) -> dict:
+    return await service.report_avg_resolution_time()
+
+@router.get("/reports/sla-breach-by-severity", summary="SLA breaches grouped by severity")
+async def report_sla_breach_by_severity(
+    actor: CurrentActor = _AdminActor,
+    service: AdminService = Depends(_admin_svc),
+) -> dict:
+    return await service.report_sla_breach_by_severity()
+
+@router.get("/reports/tickets-by-day", summary="Tickets created per day (last 30 days)")
+async def report_tickets_by_day(
+    actor: CurrentActor = _AdminActor,
+    service: AdminService = Depends(_admin_svc),
+) -> dict:
+    return await service.report_tickets_created_by_day()
+
+@router.get("/reports/top-companies", summary="Top companies by ticket volume")
+async def report_top_companies(
+    actor: CurrentActor = _AdminActor,
+    service: AdminService = Depends(_admin_svc),
+) -> dict:
+    return await service.report_top_companies_by_tickets()
+
 
 
 # ── Teams ─────────────────────────────────────────────────────────────────────
@@ -413,6 +502,17 @@ async def add_team_member(
     member = await service.add_member(str(team_id), payload, actor.actor_id)
     return TeamMemberResponse.model_validate(member)
 
+@router.get(
+    "/teams/{team_id}/members",
+    summary="List members of a team",
+)
+async def list_team_members(
+    team_id: uuid.UUID,
+    actor:   CurrentActor = _AdminActor,
+    service: AdminService = Depends(_admin_svc),
+) -> list:
+    return await service.list_team_members(str(team_id))
+
 
 @router.delete(
     "/teams/{team_id}/members/{member_id}",
@@ -428,3 +528,4 @@ async def remove_team_member(
     service:   TeamService  = Depends(_team_svc),
 ) -> None:
     await service.remove_member(str(member_id), actor.actor_id)
+

@@ -1,3 +1,4 @@
+# ticket service models 
 from __future__ import annotations
 
 import uuid
@@ -91,12 +92,15 @@ class SLARule(Base):
 
 class KeywordRule(Base):
     __tablename__ = "keyword_rule"
-    __table_args__: ClassVar[dict] = {"schema": "ticket"}
+    __table_args__: ClassVar[tuple] = (
+        UniqueConstraint("keyword", "product_id", name="uq_keyword_product"),
+        {"schema": "ticket"},
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid6.uuid7
     )
-    keyword: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    keyword: Mapped[str] = mapped_column(String(100), nullable=False)  # ← removed unique=True
     severity: Mapped[str] = mapped_column(String(20), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_by: Mapped[Optional[uuid.UUID]] = mapped_column(
@@ -104,6 +108,9 @@ class KeywordRule(Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
+    )
+    product_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), nullable=True, index=True
     )
 
 

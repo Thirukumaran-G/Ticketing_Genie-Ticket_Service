@@ -128,15 +128,6 @@ class TeamService:
         member = await self._member_repo.get_by_id(member_id)
         if not member:
             raise NotFoundException(f"Team member {member_id} not found.")
-        await self._member_repo.deactivate(member_id)
-        await audit_service.log(
-            entity_type="team_member",
-            entity_id=member.id,
-            action="team_member_removed",
-            actor_id=uuid.UUID(actor_id),
-            actor_type="user",
-            old_value={"is_active": True},
-            new_value={"is_active": False},
-        )
+        await self._member_repo.hard_delete(member_id)   # ← was deactivate()
         await self._session.commit()
-        logger.info("team_member_removed", member_id=member_id, actor_id=actor_id)
+        logger.info("team_member_hard_deleted", member_id=member_id, actor_id=actor_id)
