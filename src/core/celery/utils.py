@@ -162,3 +162,37 @@ async def fetch_agent_name(user_id) -> str | None:
     except Exception as exc:
         logger.warning("fetch_agent_name_error", user_id=str(user_id), error=str(exc))
     return None
+
+
+async def fetch_product_info(product_id: str) -> tuple[str | None, str | None]:
+    """
+    Fetch (name, description) for a product directly from auth.product.
+    Same DB instance, cross-schema query via CelerySessionFactory.
+    Returns (None, None) on any error.
+    """
+    import uuid as _uuid
+    from sqlalchemy import select, text
+
+    try:
+        from src.data.clients.postgres_client import CelerySessionFactory
+        async with CelerySessionFactory() as session:
+            result = await session.execute(
+                text(
+                    "SELECT name, description FROM auth.product WHERE id = :pid"
+                ),
+                {"pid": _uuid.UUID(product_id)},
+            )
+            row = result.fetchone()
+            if row:
+                logger.info(
+                    "fetch_product_info_ok",
+                    product_id=product_id,
+                    name=row.name,
+                )
+                return row.name, row.description
+            logger.warning("fetch_product_info_not_found", product_id=product_id)
+    except Exception as exc:
+        logger.error("fetch_product_info_error", product_id=product_id, error=str(exc))
+
+    return None, None
+
