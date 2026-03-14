@@ -100,7 +100,7 @@ class KeywordRule(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid6.uuid7
     )
-    keyword: Mapped[str] = mapped_column(String(100), nullable=False)  # ← removed unique=True
+    keyword: Mapped[str] = mapped_column(String(100), nullable=False)  
     severity: Mapped[str] = mapped_column(String(20), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_by: Mapped[Optional[uuid.UUID]] = mapped_column(
