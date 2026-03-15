@@ -51,10 +51,6 @@ def _conv_svc(session: AsyncSession = Depends(get_db_session)) -> ConversationSe
     summary="Create a support ticket",
     description=(
         "Customer submits a ticket via multipart/form-data. "
-        "Up to 5 attachments (max 25 MB each) may be included in the same request. "
-        "Attachments are saved synchronously before the response is returned. "
-        "AI classification, SLA assignment, draft generation, and agent auto-assign "
-        "run asynchronously in the background via Celery."
     ),
 )
 async def create_ticket(
@@ -78,8 +74,7 @@ async def create_ticket(
             status_code=422,
             detail="A maximum of 5 attachments are allowed per ticket.",
         )
-
-    # ── Build internal request object ────────────────────────────────────────
+    
     import uuid as _uuid
     try:
         product_uuid = _uuid.UUID(product_id)
@@ -94,11 +89,7 @@ async def create_ticket(
         environment=environment,
         source=source or "web",
     )
-
-    # ── Derive tier snapshot from JWT ────────────────────────────────────────
     tier_snapshot = actor.get_tier_name_for_product(product_id)
-
-    # ── Create ticket (synchronous, commits) ─────────────────────────────────
     ticket = await service.create_ticket(
         payload=payload,
         customer_id=actor.actor_id,
@@ -106,11 +97,6 @@ async def create_ticket(
         tier_snapshot=tier_snapshot,
         customer_email=actor.email,
     )
-
-    # ── Save attachments synchronously before responding ─────────────────────
-    # We read + save each file immediately so they are persisted even if the
-    # client disconnects after receiving the 201. Errors on individual files
-    # are non-fatal — we log and skip rather than rolling back the ticket.
     if real_files:
         for upload in real_files:
             try:

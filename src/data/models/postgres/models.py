@@ -140,15 +140,38 @@ class NotificationTemplate(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid6.uuid7
     )
-    event_type: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
-    subject_template: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    body_template: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    key: Mapped[str] = mapped_column(
+        String(100), nullable=False, unique=True, index=True,
+        comment="Stable identifier used in code e.g. sla_apology, ticket_resolved"
+    )
+    name: Mapped[str] = mapped_column(
+        String(255), nullable=False,
+        comment="Human-readable display name shown in TL settings UI"
+    )
+    subject: Mapped[str] = mapped_column(
+        Text, nullable=False,
+        comment="Email subject / notification title — supports {ticket_number} etc."
+    )
+    body: Mapped[str] = mapped_column(
+        Text, nullable=False,
+        comment="Full message body — supports {ticket_number}, {customer_name}, {agent_name}"
+    )
+    variables: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list,
+        comment="List of variable names available in this template e.g. ['ticket_number']"
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True
+    )
     updated_by: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), nullable=True
+        UUID(as_uuid=True), nullable=True,
+        comment="Last TL user_id who edited this template"
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
     )
 
 
@@ -232,7 +255,6 @@ class Ticket(Base):
     environment: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     product_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), nullable=True, index=True
-        # logical ref → auth.product.id
     )
     team_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True),
@@ -241,20 +263,15 @@ class Ticket(Base):
     )
     customer_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), nullable=False, index=True
-        # logical ref → auth.user.id where role=customer
     )
     company_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), nullable=True, index=True
-        # logical ref → auth.company.id — snapshot at creation
     )
     assigned_to: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), nullable=True
-        # logical ref → auth.user.id where role=agent|team_lead
     )
     tier_snapshot: Mapped[Optional[str]] = mapped_column(
         String(20), nullable=True
-        # frozen at creation from jwt.product_tiers[product_id]["tier_name"]
-        # historical SLA accuracy even if subscription changes
     )
     email_message_id: Mapped[Optional[str]] = mapped_column(
         String(255), nullable=True
@@ -289,6 +306,14 @@ class Ticket(Base):
     )
     sla_breached_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+    on_hold_started_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+        comment="Timestamp when ticket entered on_hold — used to calc accumulated pause time"
+    )
+    on_hold_duration_accumulated: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0,
+        comment="Total minutes spent on_hold across all cycles — subtracted from SLA elapsed time"
     )
     reopen_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     resolved_at: Mapped[Optional[datetime]] = mapped_column(
@@ -496,3 +521,72 @@ class EmailProcessing(Base):
     ticket: Mapped[Optional["Ticket"]] = relationship(
         "Ticket", back_populates="email_processings"
     )
+
+class SimilarTicketGroup(Base):
+    __tablename__ = "similar_ticket_group"
+    __table_args__: ClassVar[dict] = {"schema": "ticket"}
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid6.uuid7
+    )
+    name: Mapped[Optional[str]] = mapped_column(
+        String(255), nullable=True,
+        comment="Optional TL-assigned label e.g. 'Payment gateway outage Jan 25'"
+    )
+    confirmed_by_lead: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False,
+        comment="TL confirmed this is genuinely the same root issue"
+    )
+    confirmed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    confirmed_by: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), nullable=True,
+        comment="TL user_id who confirmed the group"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    members: Mapped[list["SimilarTicketGroupMember"]] = relationship(
+        "SimilarTicketGroupMember",
+        back_populates="group",
+        cascade="all, delete-orphan",
+    )
+
+
+class SimilarTicketGroupMember(Base):
+    __tablename__ = "similar_ticket_group_member"
+    __table_args__: ClassVar[tuple] = (
+        UniqueConstraint("group_id", "ticket_id", name="uq_group_ticket"),
+        {"schema": "ticket"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid6.uuid7
+    )
+    group_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("ticket.similar_ticket_group.id", ondelete="CASCADE"),
+        nullable=False, index=True
+    )
+    ticket_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("ticket.ticket.id", ondelete="CASCADE"),
+        nullable=False, index=True
+    )
+    similarity_score: Mapped[float] = mapped_column(
+        nullable=False, default=0.0,
+        comment="Cosine similarity score 0.0-1.0 at time of detection"
+    )
+    added_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    group: Mapped["SimilarTicketGroup"] = relationship(
+        "SimilarTicketGroup", back_populates="members"
+    )
+    ticket: Mapped["Ticket"] = relationship("Ticket")

@@ -1,9 +1,3 @@
-"""
-Notification Celery worker.
-
-alert_team_lead: notifies only the specific team's team lead — preference-aware.
-"""
-
 from __future__ import annotations
 
 import asyncio

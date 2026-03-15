@@ -33,8 +33,6 @@ class Settings(BaseSettings):
     # IMAP — optional, email inbound polling disabled if not set
     IMAP_HOST: str | None = None
     IMAP_PORT: int = 993
-    IMAP_USER: str | None = None
-    IMAP_PASSWORD: str | None = None
     IMAP_MAILBOX: str = "INBOX"
 
     # JWT
