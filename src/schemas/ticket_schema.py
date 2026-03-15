@@ -48,8 +48,8 @@ class CustomerTicketListItem(BaseModel):
     title:             Optional[str]
     status:            str
     customer_severity: Optional[str]   = Field(None, alias="customer_priority")
-    priority:          Optional[str]   # system-derived, shown so customer knows urgency
-    severity:          Optional[str]   # system-derived severity
+    priority:          Optional[str]
+    severity:          Optional[str]
     product_id:        Optional[uuid.UUID]
     environment:       Optional[str]
     source:            Optional[str]
@@ -61,17 +61,15 @@ class CustomerTicketListItem(BaseModel):
 
 
 class CustomerTicketDetailResponse(CustomerTicketListItem):
-    """Full detail view for a single customer ticket — includes AI draft hidden,
-    agent info omitted (agent identity not exposed to customer)."""
-    description:           Optional[str]
-    priority_overridden:   bool
-    # We expose override_reason so the customer understands the priority change
-    override_reason:       Optional[str]
-    tier_snapshot:         Optional[str]
-    first_response_at:     Optional[datetime]
-    reopen_count:          int
-    # SLA breach flags — customer sees whether SLAs were met
-    sla_breached_at:       Optional[datetime]
+    """Full detail view for a single customer ticket."""
+    assigned_to:              Optional[uuid.UUID] 
+    description:              Optional[str]
+    priority_overridden:      bool
+    override_reason:          Optional[str]
+    tier_snapshot:            Optional[str]
+    first_response_at:        Optional[datetime]
+    reopen_count:             int
+    sla_breached_at:          Optional[datetime]
     response_sla_breached_at: Optional[datetime]
 
 
@@ -96,33 +94,36 @@ class TicketQueueItem(BaseModel):
 
 
 class TicketDetailResponse(BaseModel):
-    id: uuid.UUID
-    ticket_number: str
-    title: Optional[str] = None
-    description: Optional[str] = None
-    status: str
-    severity: Optional[str] = None
-    priority: Optional[str] = None
-    source: Optional[str] = None
-    environment: Optional[str] = None
-    customer_id: uuid.UUID
-    assigned_to: Optional[uuid.UUID] = None
-    team_id: Optional[uuid.UUID] = None
-    tier_snapshot: Optional[str] = None
-    customer_priority: Optional[str] = None
-    priority_overridden: bool = False
-    override_reason: Optional[str] = None
-    ai_draft: Optional[str] = None
-    reopen_count: int = 0
-    first_response_at: Optional[datetime] = None
-    resolved_at: Optional[datetime] = None
-    closed_at: Optional[datetime] = None
-    sla_response_due: Optional[datetime] = None
-    sla_resolve_due: Optional[datetime] = None
-    response_sla_breached_at: Optional[datetime] = None
-    sla_breached_at: Optional[datetime] = None
-    created_at: datetime
-    updated_at: datetime
+    id:                      uuid.UUID
+    ticket_number:           str
+    title:                   Optional[str]         = None
+    description:             Optional[str]         = None
+    status:                  str
+    severity:                Optional[str]         = None
+    priority:                Optional[str]         = None
+    source:                  Optional[str]         = None
+    environment:             Optional[str]         = None
+    customer_id:             uuid.UUID
+    assigned_to:             Optional[uuid.UUID]   = None
+    team_id:                 Optional[uuid.UUID]   = None
+    tier_snapshot:           Optional[str]         = None
+    customer_priority:       Optional[str]         = None
+    priority_overridden:     bool                  = False
+    override_reason:         Optional[str]         = None
+    ai_draft:                Optional[str]         = None
+    reopen_count:            int                   = 0
+    first_response_at:       Optional[datetime]    = None
+    resolved_at:             Optional[datetime]    = None
+    closed_at:               Optional[datetime]    = None
+    sla_response_due:        Optional[datetime]    = None
+    sla_resolve_due:         Optional[datetime]    = None
+    response_sla_breached_at: Optional[datetime]  = None
+    sla_breached_at:         Optional[datetime]    = None
+    # on-hold SLA fields
+    on_hold_started_at:              Optional[datetime] = None
+    on_hold_duration_accumulated:    int                = 0
+    created_at:              datetime
+    updated_at:              datetime
 
     model_config = {"from_attributes": True}
 
@@ -144,9 +145,41 @@ class NotificationResponse(BaseModel):
     is_read:     bool
     is_internal: bool
     created_at:  datetime
-    
 
 
 class StatusUpdateRequest(BaseModel):
     status: str
     reason: Optional[str] = None
+
+
+# ── SLA Breach Justification ──────────────────────────────────────────────────
+
+class BreachJustificationRequest(BaseModel):
+    """
+    Agent submits this when response or resolution SLA has been breached.
+    breach_type: "response" | "resolution"
+    justification: min 30 chars — forces meaningful explanation
+    """
+    breach_type:   str = Field(
+        ...,
+        pattern="^(response|resolution)$",
+        description="Which SLA was breached: response or resolution",
+    )
+    justification: str = Field(
+        ...,
+        min_length=30,
+        description="Minimum 30 characters — explain what caused the breach",
+    )
+
+
+class BreachJustificationResponse(BaseModel):
+    """
+    Single breach justification entry returned to TL.
+    Derived from Conversation rows prefixed with [BREACH_JUSTIFICATION].
+    """
+    conversation_id: uuid.UUID
+    ticket_id:       uuid.UUID
+    agent_id:        uuid.UUID
+    breach_type:     str
+    justification:   str
+    submitted_at:    datetime

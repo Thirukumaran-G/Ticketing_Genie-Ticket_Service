@@ -1,10 +1,9 @@
-# ticket service
 from __future__ import annotations
 
 import asyncio
 import json
 
-from fastapi import APIRouter, Depends  
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,8 +11,15 @@ from src.api.rest.dependencies import CurrentActor, ROLE_AGENT, require_role
 from src.core.services.agent_services import AgentService
 from src.core.sse.sse_manager import sse_manager
 from src.data.clients.postgres_client import get_db_session
-from src.schemas.ticket_schema import TicketQueueItem, StatusUpdateRequest, TicketDetailResponse, UnassignRequest
-from fastapi import HTTPException
+from src.schemas.ticket_schema import (
+    TicketQueueItem,
+    StatusUpdateRequest,
+    TicketDetailResponse,
+    UnassignRequest,
+    BreachJustificationRequest,
+    BreachJustificationResponse,
+)
+
 router = APIRouter(tags=["Agent — Queue"])
 
 _AgentActor = Depends(require_role(ROLE_AGENT))
@@ -22,6 +28,8 @@ _AgentActor = Depends(require_role(ROLE_AGENT))
 def _agent_svc(session: AsyncSession = Depends(get_db_session)) -> AgentService:
     return AgentService(session)
 
+
+# ── Queue ─────────────────────────────────────────────────────────────────────
 
 @router.get(
     "/agent/queue",
@@ -34,6 +42,9 @@ async def get_agent_queue(
 ) -> list[TicketQueueItem]:
     tickets = await service.get_agent_queue(actor.actor_id)
     return [TicketQueueItem.model_validate(t) for t in tickets]
+
+
+# ── Single ticket ─────────────────────────────────────────────────────────────
 
 @router.get(
     "/agent/tickets/{ticket_id}",
@@ -52,6 +63,8 @@ async def get_agent_ticket(
     return TicketDetailResponse.model_validate(ticket)
 
 
+# ── SSE stream ────────────────────────────────────────────────────────────────
+
 @router.get(
     "/agent/queue/stream",
     summary="Agent — SSE stream for real-time queue updates",
@@ -60,18 +73,13 @@ async def get_agent_ticket(
 async def agent_queue_stream(
     actor: CurrentActor = _AgentActor,
 ) -> StreamingResponse:
-    """
-    Events:
-      event: queue_update  — new ticket assigned or status changed
-      : keepalive          — every 30s
-    """
     async def _stream():
         async with sse_manager.subscribe(actor.actor_id) as q:
             while True:
                 try:
                     payload = await asyncio.wait_for(q.get(), timeout=30)
-                    event = payload["event"]
-                    data  = json.dumps(payload["data"])
+                    event   = payload["event"]
+                    data    = json.dumps(payload["data"])
                     yield f"event: {event}\ndata: {data}\n\n"
                 except asyncio.TimeoutError:
                     yield ": keepalive\n\n"
@@ -89,6 +97,8 @@ async def agent_queue_stream(
     )
 
 
+# ── Customer info ─────────────────────────────────────────────────────────────
+
 @router.get(
     "/agent/tickets/{ticket_id}/customer",
     summary="Agent — fetch customer info for a ticket",
@@ -102,12 +112,14 @@ async def get_ticket_customer_info(
         ticket = await service.get_ticket_by_id(actor.actor_id, ticket_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
-    
+
     info = await service.get_customer_info(str(ticket.customer_id))
     if not info:
         raise HTTPException(status_code=404, detail="Customer info not found")
     return info
 
+
+# ── Status update ─────────────────────────────────────────────────────────────
 
 @router.patch(
     "/agent/tickets/{ticket_id}/status",
@@ -115,9 +127,9 @@ async def get_ticket_customer_info(
 )
 async def update_agent_ticket_status(
     ticket_id: str,
-    payload: StatusUpdateRequest,
-    actor: CurrentActor = _AgentActor,
-    service: AgentService = Depends(_agent_svc),
+    payload:   StatusUpdateRequest,
+    actor:     CurrentActor = _AgentActor,
+    service:   AgentService = Depends(_agent_svc),
 ):
     try:
         ticket = await service.update_ticket_status(
@@ -130,17 +142,23 @@ async def update_agent_ticket_status(
         raise HTTPException(status_code=422, detail=str(exc))
     return ticket
 
+
+# ── All assigned tickets ──────────────────────────────────────────────────────
+
 @router.get(
     "/agent/tickets",
     response_model=list[TicketQueueItem],
     summary="Agent — fetch all assigned tickets",
 )
 async def get_agent_tickets(
-    actor: CurrentActor = _AgentActor,
+    actor:   CurrentActor = _AgentActor,
     service: AgentService = Depends(_agent_svc),
 ) -> list[TicketQueueItem]:
     tickets = await service.get_agent_queue(actor.actor_id)
     return [TicketQueueItem.model_validate(t) for t in tickets]
+
+
+# ── Self-unassign ─────────────────────────────────────────────────────────────
 
 @router.patch(
     "/agent/tickets/{ticket_id}/unassign",
@@ -148,16 +166,10 @@ async def get_agent_tickets(
 )
 async def unassign_agent_ticket(
     ticket_id: str,
-    payload: UnassignRequest,
-    actor: CurrentActor = _AgentActor,
-    service: AgentService = Depends(_agent_svc),
+    payload:   UnassignRequest,
+    actor:     CurrentActor = _AgentActor,
+    service:   AgentService = Depends(_agent_svc),
 ):
-    """
-    Agent unassigns themselves from a ticket.
-    Ticket reverts to 'new' status and appears in TL unassigned queue.
-    Justification is saved as an internal note on the ticket.
-    SSE push fires to team lead immediately.
-    """
     try:
         ticket = await service.unassign_ticket(
             agent_id=actor.actor_id,
@@ -167,3 +179,52 @@ async def unassign_agent_ticket(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     return TicketDetailResponse.model_validate(ticket)
+
+
+# ── SLA Breach Justification — submit ─────────────────────────────────────────
+
+@router.post(
+    "/agent/tickets/{ticket_id}/breach-justification",
+    response_model=BreachJustificationResponse,
+    status_code=201,
+    summary="Agent — submit SLA breach justification (notifies TL in-app)",
+)
+async def submit_breach_justification(
+    ticket_id: str,
+    payload:   BreachJustificationRequest,
+    actor:     CurrentActor = _AgentActor,
+    service:   AgentService = Depends(_agent_svc),
+    session:   AsyncSession = Depends(get_db_session),
+) -> BreachJustificationResponse:
+    try:
+        result = await service.submit_breach_justification(
+            agent_id=actor.actor_id,
+            ticket_id=ticket_id,
+            breach_type=payload.breach_type,
+            justification=payload.justification,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    return result
+
+
+# ── SLA Breach Justification — list (agent view of own submissions) ───────────
+
+@router.get(
+    "/agent/tickets/{ticket_id}/breach-justifications",
+    response_model=list[BreachJustificationResponse],
+    summary="Agent — list breach justifications submitted for this ticket",
+)
+async def list_breach_justifications_agent(
+    ticket_id: str,
+    actor:     CurrentActor = _AgentActor,
+    service:   AgentService = Depends(_agent_svc),
+) -> list[BreachJustificationResponse]:
+    try:
+        await service.get_ticket_by_id(actor.actor_id, ticket_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    return await service.get_breach_justifications(ticket_id)

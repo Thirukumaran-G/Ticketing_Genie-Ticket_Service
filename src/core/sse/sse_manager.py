@@ -1,90 +1,189 @@
 """
-SSEManager — manages open SSE connections per user.
+SSE Manager — per-user async queue fan-out supporting multiple browser tabs.
 src/core/sse/sse_manager.py
 
-Each connected user gets an asyncio.Queue.
-Redis subscriber pushes events into the relevant queues.
-SSE endpoints drain their queue and stream to the client.
+Key changes from original:
+  - _subscribers: dict[actor_id, list[asyncio.Queue]]
+    Multiple queues per user → multiple open tabs all receive events.
+  - subscribe(actor_id): appends a new Queue, yields it, removes on exit.
+  - push(actor_id, payload): iterates ALL queues for that actor.
+  - publish() is an alias for push() — unifies naming used across workers.
+  - Dead queues (full / closed) are silently dropped during fan-out.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 from collections import defaultdict
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
+from typing import AsyncIterator
 
 from src.observability.logging.logger import get_logger
 
 logger = get_logger(__name__)
 
+# Max events buffered per tab before we drop the oldest
+_QUEUE_MAX_SIZE = 100
+
 
 class SSEManager:
-    """Singleton — holds {user_id → list[asyncio.Queue]} for open SSE connections."""
 
     def __init__(self) -> None:
-        # user_id (str) → list of queues (one per open browser tab / connection)
-        self._connections: dict[str, list[asyncio.Queue]] = defaultdict(list)
+        # actor_id → list of active queues (one per open browser tab/connection)
+        self._subscribers: dict[str, list[asyncio.Queue]] = defaultdict(list)
+        self._lock = asyncio.Lock()
 
-    def connect(self, user_id: str) -> asyncio.Queue:
-        q: asyncio.Queue = asyncio.Queue(maxsize=100)
-        self._connections[user_id].append(q)
-        logger.info("sse_connected", user_id=user_id, total=len(self._connections[user_id]))
-        return q
-
-    def disconnect(self, user_id: str, q: asyncio.Queue) -> None:
-        try:
-            self._connections[user_id].remove(q)
-        except ValueError:
-            pass
-        if not self._connections[user_id]:
-            del self._connections[user_id]
-        logger.info("sse_disconnected", user_id=user_id)
-
-    async def push(self, user_id: str, event: str, data: dict) -> None:
-        """Push an event to all open connections for user_id."""
-        queues = self._connections.get(user_id, [])
-        if not queues:
-            return
-        payload = {"event": event, "data": data}
-        for q in queues:
-            try:
-                q.put_nowait(payload)
-            except asyncio.QueueFull:
-                logger.warning("sse_queue_full", user_id=user_id)
-
-    async def broadcast(self, user_ids: list[str], event: str, data: dict) -> None:
-        for uid in user_ids:
-            await self.push(uid, event, data)
+    # ── Subscribe (one connection) ─────────────────────────────────────────────
 
     @asynccontextmanager
-    async def subscribe(
-        self, user_id: str
-    ) -> AsyncGenerator[asyncio.Queue, None]:
-        """Context manager — auto-connects and disconnects."""
-        q = self.connect(user_id)
+    async def subscribe(self, actor_id: str) -> AsyncIterator[asyncio.Queue]:
+        """
+        Async context manager — yields a dedicated Queue for this connection.
+        Registers on entry, deregisters on exit (even on crash/disconnect).
+
+        Usage in SSE route:
+            async with sse_manager.subscribe(actor_id) as q:
+                while True:
+                    payload = await asyncio.wait_for(q.get(), timeout=30)
+                    yield f"event: {payload['event']}\\ndata: ...\\n\\n"
+        """
+        q: asyncio.Queue = asyncio.Queue(maxsize=_QUEUE_MAX_SIZE)
+
+        async with self._lock:
+            self._subscribers[actor_id].append(q)
+            tab_count = len(self._subscribers[actor_id])
+
+        logger.info(
+            "sse_subscriber_connected",
+            actor_id=actor_id,
+            open_tabs=tab_count,
+        )
+
         try:
             yield q
         finally:
-            self.disconnect(user_id, q)
+            async with self._lock:
+                try:
+                    self._subscribers[actor_id].remove(q)
+                except ValueError:
+                    pass  # already removed — race condition guard
+                remaining = len(self._subscribers[actor_id])
+                if remaining == 0:
+                    del self._subscribers[actor_id]
 
-    async def event_stream(
-        self, user_id: str, q: asyncio.Queue
-    ) -> AsyncGenerator[str, None]:
-        """Drain queue and yield SSE-formatted strings."""
-        try:
-            while True:
-                payload = await asyncio.wait_for(q.get(), timeout=30)
-                event   = payload["event"]
-                data    = json.dumps(payload["data"])
-                yield f"event: {event}\ndata: {data}\n\n"
-        except asyncio.TimeoutError:
-            # Keepalive ping — prevents proxy from closing idle connections
-            yield ": keepalive\n\n"
-        except asyncio.CancelledError:
-            return
+            logger.info(
+                "sse_subscriber_disconnected",
+                actor_id=actor_id,
+                remaining_tabs=remaining if 'remaining' in dir() else 0,
+            )
+
+    # ── Push event to all tabs for one user ───────────────────────────────────
+
+    async def push(self, actor_id: str, payload: dict) -> int:
+        """
+        Push payload to ALL open queues for actor_id.
+
+        payload format expected by SSE routes:
+            { "event": "notification" | "queue_update" | "read_receipt",
+              "data":  { ... } }
+
+        Returns number of queues that received the event.
+        Dead / full queues are silently skipped and removed.
+        """
+        async with self._lock:
+            queues = list(self._subscribers.get(actor_id, []))
+
+        if not queues:
+            logger.debug("sse_push_no_subscribers", actor_id=actor_id)
+            return 0
+
+        delivered = 0
+        dead: list[asyncio.Queue] = []
+
+        for q in queues:
+            try:
+                q.put_nowait(payload)
+                delivered += 1
+            except asyncio.QueueFull:
+                # Tab is not consuming — mark for removal
+                logger.warning(
+                    "sse_queue_full_dropping_tab",
+                    actor_id=actor_id,
+                )
+                dead.append(q)
+            except Exception as exc:
+                logger.warning(
+                    "sse_push_queue_error",
+                    actor_id=actor_id,
+                    error=str(exc),
+                )
+                dead.append(q)
+
+        # Remove dead queues
+        if dead:
+            async with self._lock:
+                for dq in dead:
+                    try:
+                        self._subscribers[actor_id].remove(dq)
+                    except ValueError:
+                        pass
+                if not self._subscribers.get(actor_id):
+                    self._subscribers.pop(actor_id, None)
+
+        logger.debug(
+            "sse_push_delivered",
+            actor_id=actor_id,
+            delivered=delivered,
+            total_queues=len(queues),
+        )
+        return delivered
+
+    # publish is an alias — workers imported both names historically
+    async def publish(self, actor_id: str, payload: dict) -> int:
+        return await self.push(actor_id, payload)
+
+    # ── Convenience: push a notification event ────────────────────────────────
+
+    async def push_notification(
+        self,
+        actor_id:      str,
+        notif_type:    str,
+        title:         str,
+        message:       str,
+        ticket_number: str | None = None,
+        ticket_id:     str | None = None,
+        extra:         dict | None = None,
+    ) -> int:
+        """
+        Shorthand for pushing a 'notification' event.
+        Avoids repeating the payload structure everywhere.
+        """
+        data: dict = {
+            "type":    notif_type,
+            "title":   title,
+            "message": message,
+        }
+        if ticket_number:
+            data["ticket_number"] = ticket_number
+        if ticket_id:
+            data["ticket_id"] = ticket_id
+        if extra:
+            data.update(extra)
+
+        return await self.push(actor_id, {"event": "notification", "data": data})
+
+    # ── Diagnostics ───────────────────────────────────────────────────────────
+
+    @property
+    def connected_users(self) -> list[str]:
+        return list(self._subscribers.keys())
+
+    def tab_count(self, actor_id: str) -> int:
+        return len(self._subscribers.get(actor_id, []))
+
+    def total_connections(self) -> int:
+        return sum(len(qs) for qs in self._subscribers.values())
 
 
-# ── Global singleton ──────────────────────────────────────────────────────────
+# Process-level singleton
 sse_manager = SSEManager()
