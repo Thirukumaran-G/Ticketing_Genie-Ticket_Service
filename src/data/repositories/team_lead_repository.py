@@ -163,7 +163,7 @@ class TeamLeadRepository:
         await self._s.execute(
             update(Ticket)
             .where(Ticket.id == uuid.UUID(ticket_id))
-            .values(assigned_to=uuid.UUID(agent_user_id), status="open")
+            .values(assigned_to=uuid.UUID(agent_user_id), status="in_progress")
         )
         await self._s.flush()
 

@@ -22,7 +22,6 @@ class TicketRepository:
         return ticket
 
     async def get_by_id(self, ticket_id: str) -> Optional[Ticket]:
-        """Fetch a ticket by ID only — no scope check."""
         r = await self._s.execute(
             select(Ticket).where(Ticket.id == uuid.UUID(ticket_id))
         )
@@ -45,7 +44,6 @@ class TicketRepository:
         limit: int = 50,
         offset: int = 0,
     ) -> list[Ticket]:
-        """All tickets belonging to this customer, newest first."""
         q = (
             select(Ticket)
             .where(Ticket.customer_id == uuid.UUID(customer_id))
@@ -61,7 +59,6 @@ class TicketRepository:
         ticket_id: str,
         customer_id: str,
     ) -> Optional[Ticket]:
-        """Fetch a single ticket — only if it belongs to this customer."""
         r = await self._s.execute(
             select(Ticket).where(
                 Ticket.id == uuid.UUID(ticket_id),
@@ -78,7 +75,7 @@ class TicketRepository:
         statuses: list[str] | None = None,
         limit: int = 50,
     ) -> list[Ticket]:
-        statuses = statuses or ["new", "open", "in_progress", "on_hold"]
+        statuses = statuses or ["new", "open", "acknowledged", "in_progress", "on_hold"]
         r = await self._s.execute(
             select(Ticket)
             .where(
@@ -95,7 +92,6 @@ class TicketRepository:
         ticket_id: str,
         agent_id: str,
     ) -> Optional[Ticket]:
-        """Fetch a single ticket — only if it is assigned to this agent."""
         r = await self._s.execute(
             select(Ticket).where(
                 Ticket.id == uuid.UUID(ticket_id),
@@ -104,7 +100,7 @@ class TicketRepository:
         )
         return r.scalar_one_or_none()
 
-    # ── Team lead queue — unassigned tickets for team ─────────────────────────
+    # ── Team lead queue ───────────────────────────────────────────────────────
 
     async def get_team_lead_queue(
         self,
@@ -153,14 +149,16 @@ class TicketRepository:
         count = r.scalar() or 0
         return f"TKT-{count + 1:06d}"
 
+    # ── Unassign — clears agent, sets status to open ──────────────────────────
+
     async def unassign_ticket(self, ticket_id: str) -> None:
-        """Clear assigned_to and reset status to new."""
-        await self._s.execute(                         
+        """Clear assigned_to and set status to open (unassigned but acknowledged)."""
+        await self._s.execute(
             update(Ticket)
             .where(Ticket.id == uuid.UUID(ticket_id))
-            .values(assigned_to=None, status="new")
+            .values(assigned_to=None, status="open")
         )
-        await self._s.flush()                          
+        await self._s.flush()
 
 
 class NotificationRepository:

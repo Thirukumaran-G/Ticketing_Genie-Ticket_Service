@@ -3,7 +3,7 @@ FastAPI dependencies for ticket-service.
 
 JWT is validated via auth-service internal endpoint.
 Role names mirror auth-service seeded roles:
-  "customer" | "support_agent" | "support_team_lead" | "admin"
+  "customer" | "agent" | "team_lead" | "admin"
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, Dict, Optional
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from src.handlers.http_clients.auth_client import AuthHttpClient
@@ -19,7 +19,8 @@ from src.observability.logging.logger import get_logger
 
 logger = get_logger(__name__)
 
-_bearer = HTTPBearer()
+# auto_error=False so we can fall back to cookie without a hard 403
+_bearer = HTTPBearer(auto_error=False)
 
 # ── Role constants ────────────────────────────────────────────────────────────
 
@@ -40,24 +41,19 @@ class CurrentActor:
         self,
         actor_id:      str,
         role_name:     str,
-        email:         str | None                    = None,
-        company_id:    str | None                    = None,
-        product_tiers: Dict[str, Any] | None         = None,
+        email:         str | None            = None,
+        company_id:    str | None            = None,
+        product_tiers: Dict[str, Any] | None = None,
     ) -> None:
         self.actor_id      = actor_id
         self.role_name     = role_name
         self.email         = email
         self.company_id    = company_id
-        # product_tiers: { "<product_id>": { "tier_id": ..., "tier_name": ..., "code": ... } }
         self.product_tiers: Dict[str, Any] = product_tiers or {}
 
     # ── Per-product tier lookup ───────────────────────────────────────────────
 
     def get_tier_name_for_product(self, product_id: str) -> str | None:
-        """
-        Return tier_name for the given product_id from JWT product_tiers.
-        Returns None if product not found — never falls back to a default.
-        """
         entry = self.product_tiers.get(str(product_id))
         if not entry:
             return None
@@ -98,13 +94,36 @@ class CurrentActor:
         )
 
 
+# ── Token extraction helper ───────────────────────────────────────────────────
+
+def _extract_token(
+    request:     Request,
+    credentials: Optional[HTTPAuthorizationCredentials],
+) -> str:
+    """
+    Extract bearer token from:
+    1. Authorization: Bearer <token>  header
+    2. access_token httpOnly cookie (set by auth-service on login/refresh)
+    """
+    if credentials and credentials.credentials:
+        return credentials.credentials
+
+    cookie_token = request.cookies.get("access_token")
+    if cookie_token:
+        return cookie_token
+
+    raise HTTPException(status_code=401, detail="Missing authorization token.")
+
+
 # ── Core dependency ───────────────────────────────────────────────────────────
 
 async def get_current_actor(
-    credentials: HTTPAuthorizationCredentials = Depends(_bearer),
+    request:     Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
 ) -> CurrentActor:
     """Validate Bearer JWT via auth-service and hydrate CurrentActor."""
-    token = credentials.credentials
+    token = _extract_token(request, credentials)
+
     auth_client = AuthHttpClient()
     result = await auth_client.validate_token(token)
 
@@ -134,7 +153,7 @@ def require_role(*allowed_roles: str) -> Callable:
 
 
 async def get_current_actor_from_token(token: str) -> CurrentActor:
-    """Used by SSE endpoint — token comes as query param."""
+    """Used by SSE endpoint — token comes as query param, no cookie needed."""
     auth_client = AuthHttpClient()
     result = await auth_client.validate_token(token)
 
