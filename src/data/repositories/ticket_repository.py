@@ -75,7 +75,13 @@ class TicketRepository:
         statuses: list[str] | None = None,
         limit: int = 50,
     ) -> list[Ticket]:
-        statuses = statuses or ["new", "open", "acknowledged", "in_progress", "on_hold"]
+        # Matches full status machine — no 'open', includes 'assigned' and 'reopened'
+        statuses = statuses or [
+            "assigned",
+            "in_progress",
+            "on_hold",
+            "reopened",
+        ]
         r = await self._s.execute(
             select(Ticket)
             .where(
@@ -108,7 +114,9 @@ class TicketRepository:
         statuses: list[str] | None = None,
         limit: int = 100,
     ) -> list[Ticket]:
-        statuses = statuses or ["new", "open"]
+        # Unassigned tickets waiting for TL to assign
+        # 'acknowledged' = Celery classified but couldn't auto-assign
+        statuses = statuses or ["acknowledged"]
         r = await self._s.execute(
             select(Ticket)
             .where(
@@ -126,7 +134,14 @@ class TicketRepository:
     async def get_open_unmonitored(self, limit: int = 500) -> list[Ticket]:
         r = await self._s.execute(
             select(Ticket)
-            .where(Ticket.status.in_(["new", "open", "in_progress"]))
+            .where(Ticket.status.in_([
+                "new",
+                "acknowledged",
+                "assigned",
+                "in_progress",
+                "on_hold",
+                "reopened",
+            ]))
             .limit(limit)
         )
         return list(r.scalars().all())
@@ -149,14 +164,14 @@ class TicketRepository:
         count = r.scalar() or 0
         return f"TKT-{count + 1:06d}"
 
-    # ── Unassign — clears agent, sets status to open ──────────────────────────
+    # ── Unassign — returns ticket to acknowledged so TL can re-assign ─────────
 
     async def unassign_ticket(self, ticket_id: str) -> None:
-        """Clear assigned_to and set status to open (unassigned but acknowledged)."""
+        """Clear assigned_to and return status to acknowledged."""
         await self._s.execute(
             update(Ticket)
             .where(Ticket.id == uuid.UUID(ticket_id))
-            .values(assigned_to=None, status="open")
+            .values(assigned_to=None, status="acknowledged")
         )
         await self._s.flush()
 

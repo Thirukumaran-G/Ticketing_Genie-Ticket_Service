@@ -1,24 +1,3 @@
-"""
-Inbound email Celery worker.
-src/core/celery/workers/email_inbound_worker.py
-
-Beat polls IMAP every 20s → dispatches process_inbound_email per message.
-
-Pipeline:
-  1.  IMAP credentials read from email_config table (admin-configurable)
-  2.  Domain validation     → auth-service HTTP  GET /internal/companies/by-domain/{domain}
-  3.  Product list fetch    → auth-service HTTP  GET /internal/products/active
-  4.  Thread detection      → Strategy 1: In-Reply-To/References vs email_processing
-                              Strategy 2: TKT-XXXXXX extracted from subject
-  5.  User create-or-get    → auth-service HTTP  POST /internal/customers/create-or-get
-  6.  LLM extraction        → EmailExtractionAgent (Groq)
-  7.  Product resolution    → lower(llm_name) vs lower(db_names)
-  8.  Completeness check    → reply email if missing fields
-  9.  Subscription check    → direct cross-schema ORM query
-  10. Ticket creation       → ticket DB
-  11. Welcome / nudge email → EmailClient
-  12. AI worker handoff     → run_ai_classification.apply_async
-"""
 from __future__ import annotations
 
 import base64
@@ -48,29 +27,44 @@ def _get_portal_url() -> str:
     return _PORTAL_URL
 
 
-# ── IMAP credentials from DB ──────────────────────────────────────────────────
+# ── IMAP credentials + config from DB ────────────────────────────────────────
 
-async def _load_imap_credentials(session) -> tuple[str | None, str | None]:
+async def _load_imap_credentials(session) -> dict[str, str | None]:
     """
-    Read IMAP_USER and IMAP_PASSWORD from ticket.email_config table via ORM.
-    Admin configures these — never stored in env/settings.
+    Load all IMAP config from ticket.email_config table.
+    Returns dict with keys: IMAP_USER, IMAP_PASSWORD, IMAP_HOST, IMAP_PORT.
+    Falls back to settings for HOST/PORT if not in DB.
     """
     from sqlalchemy import select
     from src.data.models.postgres.models import EmailConfig
+    from src.config.settings import settings
 
     result = await session.execute(
         select(EmailConfig).where(
-            EmailConfig.key.in_(["IMAP_USER", "IMAP_PASSWORD"]),
+            EmailConfig.key.in_([
+                "IMAP_USER",
+                "IMAP_PASSWORD",
+                "IMAP_HOST",
+                "IMAP_PORT",
+            ]),
             EmailConfig.is_active.is_(True),
         )
     )
     rows = result.scalars().all()
-    creds: dict[str, str] = {
+    db_cfg: dict[str, str] = {
         row.key: row.value
         for row in rows
         if row.value
     }
-    return creds.get("IMAP_USER"), creds.get("IMAP_PASSWORD")
+
+    return {
+        "IMAP_USER":     db_cfg.get("IMAP_USER"),
+        "IMAP_PASSWORD": db_cfg.get("IMAP_PASSWORD"),
+        # HOST/PORT fall back to env/settings if admin hasn't stored them in DB
+        "IMAP_HOST":     db_cfg.get("IMAP_HOST") or settings.IMAP_HOST,
+        "IMAP_PORT":     db_cfg.get("IMAP_PORT") or str(settings.IMAP_PORT),
+        "IMAP_MAILBOX":  db_cfg.get("IMAP_MAILBOX") or settings.IMAP_MAILBOX,
+    }
 
 
 # ── Beat entry point ──────────────────────────────────────────────────────────
@@ -84,13 +78,29 @@ def poll_inbox_task() -> None:
         from src.handlers.email.imap_listener import poll_imap_inbox
 
         async with CelerySessionFactory() as session:
-            imap_user, imap_password = await _load_imap_credentials(session)
+            cfg = await _load_imap_credentials(session)
+
+        imap_user     = cfg.get("IMAP_USER")
+        imap_password = cfg.get("IMAP_PASSWORD")
+        imap_host     = cfg.get("IMAP_HOST")
+        imap_port     = int(cfg.get("IMAP_PORT") or 993)
+        imap_mailbox  = cfg.get("IMAP_MAILBOX") or "INBOX"
 
         if not imap_user or not imap_password:
             logger.debug("poll_inbox_task_skipped_no_imap_credentials")
             return
 
-        poll_imap_inbox(imap_user=imap_user, imap_password=imap_password)
+        if not imap_host:
+            logger.debug("poll_inbox_task_skipped_no_imap_host")
+            return
+
+        poll_imap_inbox(
+            imap_user=imap_user,
+            imap_password=imap_password,
+            imap_host=imap_host,
+            imap_port=imap_port,
+            imap_mailbox=imap_mailbox,
+        )
 
     run_async(_load_and_poll())
 
@@ -158,7 +168,6 @@ def process_inbound_email(
                 await session.commit()
             return {"status": "failed", "reason": "no_active_products"}
 
-        # lower_name → (product_id_str, original_name)
         product_map: dict[str, tuple[str, str]] = {
             p.name.lower().strip(): (p.id, p.name)
             for p in raw_products
@@ -168,9 +177,6 @@ def process_inbound_email(
         async with CelerySessionFactory() as session:
 
             # ── Step 3: thread detection ──────────────────────────────────────
-            # Strategy 1: In-Reply-To / References match against email_processing
-            # Strategy 2: TKT-XXXXXX found in subject (reply to our outbound email)
-            # Both strategies run — first match wins
             parent_ticket = None
             has_reply_signal = (
                 bool(in_reply_to)
@@ -383,34 +389,20 @@ async def _verify_subscription(
 # ── Thread detection ──────────────────────────────────────────────────────────
 
 def _extract_ticket_number_from_subject(subject: str) -> str | None:
-    """
-    Extract TKT-XXXXXX from subject line — pure string split, no regex.
-
-    Handles all our outbound subject formats:
-      [TKT-000003] Ticket created — Your portal access details
-      Re: [TKT-000003] Ticket created — Your portal access details
-      [TKT-000003] Agent assigned — we're on it
-      Re: [TKT-000003] Your ticket has been received
-      Fwd: Re: [TKT-000003] ...
-
-    TKT-000003 = always 10 chars: TKT- (4) + 6 digits
-    """
     upper = subject.upper()
     if "TKT-" not in upper:
         return None
 
     idx       = upper.index("TKT-")
-    candidate = subject[idx:]    # everything from TKT- onwards
+    candidate = subject[idx:]
 
-    # Walk forward collecting only alphanumeric and hyphen
     ticket_number = ""
     for ch in candidate:
         if ch.isalnum() or ch == "-":
             ticket_number += ch
         else:
-            break    # stop at ] or space or any other character
+            break
 
-    # Validate: must be exactly TKT-NNNNNN (10 chars, 6 digits after hyphen)
     if (
         len(ticket_number) == 10
         and ticket_number.upper().startswith("TKT-")
@@ -427,32 +419,13 @@ async def _find_ticket_by_thread(
     references:  str | None,
     subject:     str | None = None,
 ) -> dict | None:
-    """
-    Two-strategy thread detection.
-
-    Strategy 1 — In-Reply-To / References header match:
-      Customer replies to their own inbound email.
-      In-Reply-To = inbound message_id stored in email_processing.
-      Direct DB lookup finds the ticket.
-
-    Strategy 2 — TKT-XXXXXX in subject:
-      Customer replies to OUR outbound email (welcome, assignment, SLA etc).
-      Our outbound Message-ID is never stored in email_processing.
-      But every outbound subject contains [TKT-000003].
-      Extract ticket number → lookup ticket directly by ticket_number.
-
-    First strategy to find a match wins.
-    Returns None if neither strategy finds anything → new ticket flow.
-    """
     from sqlalchemy import select
     from src.data.models.postgres.models import EmailProcessing, Ticket
 
-    # ── Strategy 1: match In-Reply-To / References against email_processing ───
     candidates: list[str] = []
     if in_reply_to:
         candidates.append(in_reply_to.strip())
     if references:
-        # References header contains space-separated list of all prior message-ids
         candidates.extend(r.strip() for r in references.split() if r.strip())
 
     for mid in candidates:
@@ -483,17 +456,11 @@ async def _find_ticket_by_thread(
                 "customer_id":   ticket.customer_id,
             }
 
-    # ── Strategy 2: extract TKT-XXXXXX from subject ───────────────────────────
-    # Catches replies to our outbound emails — welcome, assignment,
-    # SLA notification, ticket received etc.
-    # Our SMTP Message-ID is never stored so Strategy 1 never matches these.
     if subject:
         ticket_number = _extract_ticket_number_from_subject(subject)
         if ticket_number:
             ticket_result = await session.execute(
-                select(Ticket).where(
-                    Ticket.ticket_number == ticket_number
-                )
+                select(Ticket).where(Ticket.ticket_number == ticket_number)
             )
             ticket = ticket_result.scalar_one_or_none()
             if ticket:

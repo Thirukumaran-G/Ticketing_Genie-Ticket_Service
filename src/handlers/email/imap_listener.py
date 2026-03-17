@@ -2,9 +2,9 @@
 IMAP email listener.
 src/handlers/email/imap_listener.py
 
-Credentials (imap_user, imap_password) are passed in at call time
-— loaded from ticket.email_config table by the beat task.
-IMAP_HOST, IMAP_PORT, IMAP_MAILBOX remain in settings/env.
+All five config values (user, password, host, port, mailbox) are passed
+in at call time — loaded from ticket.email_config table by the beat task.
+Nothing is read from settings inside this file anymore.
 """
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ import re
 from email.header import decode_header, make_header
 from email.message import Message
 
-from src.config.settings import settings
 from src.observability.logging.logger import get_logger
 
 logger = get_logger(__name__)
@@ -121,72 +120,54 @@ def _clean_body(body: str) -> str:
 
 
 def _extract_from_email(from_header: str) -> str:
-    """
-    Extract the sender email address from the From header.
-    Handles formats:
-      - plain         : user@domain.com
-      - display name  : John Doe <user@domain.com>
-      - quoted name   : "John Doe" <user@domain.com>
-    Strategy: find the @ sign, then take everything before it
-    (up to a space or <) as local part, and everything after it
-    as domain — no regex, pure string splitting.
-    """
     raw = from_header.strip()
-
-    # If angle brackets present e.g. "John <user@example.com>"
-    # extract only the part inside < >
     if "<" in raw and ">" in raw:
         start = raw.index("<") + 1
         end   = raw.index(">")
         raw   = raw[start:end].strip()
-
-    # Now raw should be plain user@domain or close to it
     raw = raw.strip().lower()
-
     if "@" not in raw:
-        # fallback — return as-is lowercased
         return raw
-
     local, domain = raw.split("@", 1)
-    # strip any trailing whitespace or stray chars from domain
-    domain = domain.strip()
-    return f"{local}@{domain}"
+    return f"{local}@{domain.strip()}"
 
 
-def _connect_imap(imap_user: str, imap_password: str) -> imaplib.IMAP4_SSL:
-    """Connect using credentials loaded from email_config table."""
-    if not settings.IMAP_HOST:
-        raise RuntimeError("IMAP_HOST not set in environment/settings")
-    conn = imaplib.IMAP4_SSL(settings.IMAP_HOST, settings.IMAP_PORT)
+def _connect_imap(
+    imap_user:     str,
+    imap_password: str,
+    imap_host:     str,
+    imap_port:     int,
+) -> imaplib.IMAP4_SSL:
+    conn = imaplib.IMAP4_SSL(imap_host, imap_port)
     conn.login(imap_user, imap_password)
     return conn
 
 
-def poll_imap_inbox(imap_user: str, imap_password: str) -> None:
+def poll_imap_inbox(
+    imap_user:     str,
+    imap_password: str,
+    imap_host:     str,
+    imap_port:     int  = 993,
+    imap_mailbox:  str  = "INBOX",
+) -> None:
     """
     Entry point called by poll_inbox_task every 20 s.
-    Credentials come from email_config table, not env.
-    Host/port/mailbox remain in settings.
+    All config comes from email_config table via the beat task.
+    Nothing is read from settings here.
     """
     from src.core.celery.workers.email_inbound_worker import process_inbound_email
 
-    if not settings.IMAP_HOST:
-        logger.debug("poll_imap_inbox_skipped_no_host")
-        return
-
-    mailbox = settings.IMAP_MAILBOX or "INBOX"
-
     try:
-        conn = _connect_imap(imap_user, imap_password)
+        conn = _connect_imap(imap_user, imap_password, imap_host, imap_port)
     except Exception as exc:
         logger.error("imap_connect_failed", error=str(exc))
         return
 
     try:
-        conn.select(mailbox)
+        conn.select(imap_mailbox)
         status, data = conn.search(None, "UNSEEN")
         if status != "OK" or not data or not data[0]:
-            logger.debug("imap_no_unseen_emails", mailbox=mailbox)
+            logger.debug("imap_no_unseen_emails", mailbox=imap_mailbox)
             return
 
         uids: list[bytes] = data[0].split()
@@ -239,7 +220,6 @@ def _process_single_email(
     body:        str = _extract_body(msg)
     attachments: list[dict] = _extract_attachments(msg)
 
-    # ── Extract sender email — pure split, no regex ───────────────────────────
     from_email: str = _extract_from_email(from_header)
 
     if not message_id:
