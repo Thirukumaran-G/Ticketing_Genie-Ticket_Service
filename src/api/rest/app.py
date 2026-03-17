@@ -12,7 +12,6 @@ from src.api.rest.routes.team_lead_routes import router as team_lead_routes
 from src.api.rest.routes.notification_routes import router as notification_router
 from src.api.rest.routes.agent_conversation_routes import router as agent_conversation_router
 from src.api.rest.routes.customer_conversation_routes import router as customer_conversation_router
-from src.api.rest.routes.conversation_routes import router as conversation_router
 from src.api.rest.routes.health import router as health_router
 from src.config.settings import settings
 from src.observability.logging.logger import configure_logging
@@ -102,5 +101,4 @@ def create_app() -> FastAPI:
     app.include_router(agent_conversation_router, prefix=prefix)
     app.include_router(customer_conversation_router, prefix=prefix)
     app.include_router(notification_router, prefix="/api/v1")  
-    app.include_router(conversation_router,prefix=prefix)
     return app

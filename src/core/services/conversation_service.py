@@ -1,26 +1,3 @@
-"""
-ConversationService — reply + attachment handling for both customer and agent.
-src/core/services/conversation_service.py
-
-Responsibilities:
-  - Post a reply (customer or agent)
-  - Upload an attachment (linked to a conversation or standalone on ticket)
-  - Fetch conversation thread + attachments for a ticket
-  - Serve an attachment file (returns local path for the route to stream)
-
-Attachment storage:
-  Files are saved to  UPLOAD_ROOT / tickets / {ticket_id} / {uuid}_{filename}
-  UPLOAD_ROOT defaults to  ./uploads  (override via UPLOAD_ROOT env var).
-  The stored file_path is the *relative* path from UPLOAD_ROOT so the app
-  remains portable across environments.
-
-Security:
-  - Customers can only post to their own tickets (ticket ownership verified by caller).
-  - Agents can only post to tickets assigned to them (verified by caller).
-  - File extension is validated against an allowlist.
-  - Filenames are sanitised before storage.
-"""
-
 from __future__ import annotations
 
 import os

@@ -1,9 +1,13 @@
+"""
+Agent routes.
+src/api/rest/routes/agent_routes.py
+"""
 from __future__ import annotations
 
 import asyncio
 import json
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,14 +23,18 @@ from src.schemas.ticket_schema import (
     BreachJustificationRequest,
     BreachJustificationResponse,
 )
+from fastapi.responses import Response
 
 router = APIRouter(tags=["Agent — Queue"])
 
 _AgentActor = Depends(require_role(ROLE_AGENT))
 
 
-def _agent_svc(session: AsyncSession = Depends(get_db_session)) -> AgentService:
-    return AgentService(session)
+def _agent_svc(
+    background_tasks: BackgroundTasks,
+    session: AsyncSession = Depends(get_db_session),
+) -> AgentService:
+    return AgentService(session, background_tasks)
 
 
 # ── Queue ─────────────────────────────────────────────────────────────────────
@@ -34,10 +42,10 @@ def _agent_svc(session: AsyncSession = Depends(get_db_session)) -> AgentService:
 @router.get(
     "/agent/queue",
     response_model=list[TicketQueueItem],
-    summary="Agent — fetch current ticket queue (initial load)",
+    summary="Agent — fetch current ticket queue",
 )
 async def get_agent_queue(
-    actor: CurrentActor = _AgentActor,
+    actor:   CurrentActor = _AgentActor,
     service: AgentService = Depends(_agent_svc),
 ) -> list[TicketQueueItem]:
     tickets = await service.get_agent_queue(actor.actor_id)
@@ -53,8 +61,8 @@ async def get_agent_queue(
 )
 async def get_agent_ticket(
     ticket_id: str,
-    actor: CurrentActor = _AgentActor,
-    service: AgentService = Depends(_agent_svc),
+    actor:     CurrentActor = _AgentActor,
+    service:   AgentService = Depends(_agent_svc),
 ) -> TicketDetailResponse:
     try:
         ticket = await service.get_ticket_by_id(actor.actor_id, ticket_id)
@@ -105,14 +113,13 @@ async def agent_queue_stream(
 )
 async def get_ticket_customer_info(
     ticket_id: str,
-    actor: CurrentActor = _AgentActor,
-    service: AgentService = Depends(_agent_svc),
+    actor:     CurrentActor = _AgentActor,
+    service:   AgentService = Depends(_agent_svc),
 ) -> dict:
     try:
         ticket = await service.get_ticket_by_id(actor.actor_id, ticket_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
-
     info = await service.get_customer_info(str(ticket.customer_id))
     if not info:
         raise HTTPException(status_code=404, detail="Customer info not found")
@@ -123,14 +130,15 @@ async def get_ticket_customer_info(
 
 @router.patch(
     "/agent/tickets/{ticket_id}/status",
-    summary="Agent — update ticket status",
+    response_model=TicketDetailResponse,
+    summary="Agent — update ticket status (in_progress / on_hold / resolved)",
 )
 async def update_agent_ticket_status(
     ticket_id: str,
     payload:   StatusUpdateRequest,
     actor:     CurrentActor = _AgentActor,
     service:   AgentService = Depends(_agent_svc),
-):
+) -> TicketDetailResponse:
     try:
         ticket = await service.update_ticket_status(
             agent_id=actor.actor_id,
@@ -140,7 +148,25 @@ async def update_agent_ticket_status(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
-    return ticket
+    return TicketDetailResponse.model_validate(ticket)
+
+
+# ── Set in-progress (called when agent opens composer) ────────────────────────
+
+
+@router.patch(
+    "/agent/tickets/{ticket_id}/in-progress",
+    status_code=204,
+    response_class=Response,
+    response_model=None,
+    summary="Agent — mark ticket in_progress when composer is opened",
+)
+async def set_in_progress(
+    ticket_id: str,
+    actor:     CurrentActor = _AgentActor,
+    service:   AgentService = Depends(_agent_svc),
+) -> None:
+    await service.set_in_progress(actor.actor_id, ticket_id)
 
 
 # ── All assigned tickets ──────────────────────────────────────────────────────
@@ -187,14 +213,13 @@ async def unassign_agent_ticket(
     "/agent/tickets/{ticket_id}/breach-justification",
     response_model=BreachJustificationResponse,
     status_code=201,
-    summary="Agent — submit SLA breach justification (notifies TL in-app)",
+    summary="Agent — submit SLA breach justification",
 )
 async def submit_breach_justification(
     ticket_id: str,
     payload:   BreachJustificationRequest,
     actor:     CurrentActor = _AgentActor,
     service:   AgentService = Depends(_agent_svc),
-    session:   AsyncSession = Depends(get_db_session),
 ) -> BreachJustificationResponse:
     try:
         result = await service.submit_breach_justification(
@@ -210,12 +235,12 @@ async def submit_breach_justification(
     return result
 
 
-# ── SLA Breach Justification — list (agent view of own submissions) ───────────
+# ── SLA Breach Justification — list ───────────────────────────────────────────
 
 @router.get(
     "/agent/tickets/{ticket_id}/breach-justifications",
     response_model=list[BreachJustificationResponse],
-    summary="Agent — list breach justifications submitted for this ticket",
+    summary="Agent — list breach justifications for this ticket",
 )
 async def list_breach_justifications_agent(
     ticket_id: str,
@@ -226,5 +251,4 @@ async def list_breach_justifications_agent(
         await service.get_ticket_by_id(actor.actor_id, ticket_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
-
     return await service.get_breach_justifications(ticket_id)
