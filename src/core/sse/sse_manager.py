@@ -1,16 +1,3 @@
-"""
-SSE Manager — per-user async queue fan-out supporting multiple browser tabs.
-src/core/sse/sse_manager.py
-
-Key changes from original:
-  - _subscribers: dict[actor_id, list[asyncio.Queue]]
-    Multiple queues per user → multiple open tabs all receive events.
-  - subscribe(actor_id): appends a new Queue, yields it, removes on exit.
-  - push(actor_id, payload): iterates ALL queues for that actor.
-  - publish() is an alias for push() — unifies naming used across workers.
-  - Dead queues (full / closed) are silently dropped during fan-out.
-"""
-
 from __future__ import annotations
 
 import asyncio

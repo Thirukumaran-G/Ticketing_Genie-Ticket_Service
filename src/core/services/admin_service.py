@@ -406,10 +406,9 @@ class AdminService:
     # ── Reports ───────────────────────────────────────────────────────────────
 
     async def report_open_tickets_by_priority(self) -> dict:
-        open_statuses = ("new", "acknowledged", "in_progress", "on_hold", "reopened")
         result = await self._session.execute(
             select(Ticket.priority, func.count(Ticket.id).label("count"))
-            .where(Ticket.status.in_(open_statuses))
+            .where(Ticket.status == "assigned")
             .group_by(Ticket.priority)
             .order_by(Ticket.priority)
         )
@@ -500,32 +499,24 @@ class AdminService:
         return {"top_companies": [{"company_id": str(r.company_id), "total": r.total} for r in rows]}
     
     async def report_dashboard_summary(self) -> dict:
-        """
-        Single aggregated summary for the admin dashboard.
-        Returns:
-          - open_ticket_count        : total open tickets (all non-terminal statuses)
-          - total_sla_breaches       : all-time breached tickets count
-          - avg_first_response_min   : average first-response time in minutes
-          - tickets_resolved_today   : tickets resolved today (UTC)
-        All from the ticket schema — no cross-service HTTP call needed.
-        """
         from sqlalchemy import cast, Date, func, select
         from src.data.models.postgres.models import Ticket
-
-        open_statuses = ("new", "acknowledged", "in_progress", "on_hold", "reopened")
-
-        # 1. open ticket count
-        open_res = await self._session.execute(
-            select(func.count(Ticket.id)).where(Ticket.status.in_(open_statuses))
+ 
+        # Only "assigned" counts as active work-in-progress
+        assigned_status = "assigned"
+ 
+        # 1. assigned ticket count
+        assigned_res = await self._session.execute(
+            select(func.count(Ticket.id)).where(Ticket.status == assigned_status)
         )
-        open_count: int = open_res.scalar_one() or 0
-
-        # 2. total all-time SLA breaches
+        assigned_count: int = assigned_res.scalar_one() or 0
+ 
+        # 2. total all-time SLA resolve breaches
         breach_res = await self._session.execute(
             select(func.count(Ticket.id)).where(Ticket.sla_breached_at.isnot(None))
         )
         total_breaches: int = breach_res.scalar_one() or 0
-
+ 
         # 3. avg first response time (minutes)
         frt_res = await self._session.execute(
             select(
@@ -535,7 +526,7 @@ class AdminService:
             ).where(Ticket.first_response_at.isnot(None))
         )
         avg_seconds = frt_res.scalar_one() or 0
-
+ 
         # 4. resolved today
         today_res = await self._session.execute(
             select(func.count(Ticket.id)).where(
@@ -543,28 +534,61 @@ class AdminService:
             )
         )
         resolved_today: int = today_res.scalar_one() or 0
-
+ 
         return {
-            "open_ticket_count":      open_count,
+            "open_ticket_count":      assigned_count,   # key kept for frontend compat
             "total_sla_breaches":     total_breaches,
             "avg_first_response_min": round((avg_seconds or 0) / 60, 1),
             "tickets_resolved_today": resolved_today,
         }
 
     async def report_sla_breaches_by_day(self) -> dict:
-        result = await self._session.execute(
+        from sqlalchemy import cast, Date, func, select, literal_column, union_all, text
+ 
+        # Response breaches by day
+        response_q = (
+            select(
+                cast(Ticket.response_sla_breached_at, Date).label("day"),
+                func.count(Ticket.id).label("response_breach_count"),
+                literal_column("0").label("resolve_breach_count"),
+            )
+            .where(Ticket.response_sla_breached_at.isnot(None))
+            .group_by(cast(Ticket.response_sla_breached_at, Date))
+        )
+ 
+        # Resolve breaches by day
+        resolve_q = (
             select(
                 cast(Ticket.sla_breached_at, Date).label("day"),
-                func.count(Ticket.id).label("breach_count"),
+                literal_column("0").label("response_breach_count"),
+                func.count(Ticket.id).label("resolve_breach_count"),
             )
             .where(Ticket.sla_breached_at.isnot(None))
-            .group_by("day")
-            .order_by("day")
+            .group_by(cast(Ticket.sla_breached_at, Date))
         )
+ 
+        # Merge both into one series keyed by day using a CTE
+        combined = union_all(response_q, resolve_q).subquery("combined")
+ 
+        merged = await self._session.execute(
+            select(
+                combined.c.day,
+                func.sum(combined.c.response_breach_count).label("response_breach_count"),
+                func.sum(combined.c.resolve_breach_count).label("resolve_breach_count"),
+            )
+            .group_by(combined.c.day)
+            .order_by(combined.c.day)
+        )
+ 
         return {
             "sla_breaches_by_day": [
-                {"day": str(row.day), "breach_count": row.breach_count}
-                for row in result.all()
+                {
+                    "day":                  str(row.day),
+                    "breach_count":         row.response_breach_count + row.resolve_breach_count,  # kept for sparkline compat
+                    "response_breach_count": row.response_breach_count,
+                    "resolve_breach_count":  row.resolve_breach_count,
+                }
+                for row in merged.all()
             ]
         }
     

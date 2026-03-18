@@ -27,8 +27,6 @@ def _get_portal_url() -> str:
     return _PORTAL_URL
 
 
-# ── IMAP credentials + config from DB ────────────────────────────────────────
-
 async def _load_imap_credentials(session) -> dict[str, str | None]:
     """
     Load all IMAP config from ticket.email_config table.
@@ -60,7 +58,6 @@ async def _load_imap_credentials(session) -> dict[str, str | None]:
     return {
         "IMAP_USER":     db_cfg.get("IMAP_USER"),
         "IMAP_PASSWORD": db_cfg.get("IMAP_PASSWORD"),
-        # HOST/PORT fall back to env/settings if admin hasn't stored them in DB
         "IMAP_HOST":     db_cfg.get("IMAP_HOST") or settings.IMAP_HOST,
         "IMAP_PORT":     db_cfg.get("IMAP_PORT") or str(settings.IMAP_PORT),
         "IMAP_MAILBOX":  db_cfg.get("IMAP_MAILBOX") or settings.IMAP_MAILBOX,
@@ -773,7 +770,6 @@ def _find_missing_fields(extracted, product_id_str: str | None) -> list[str]:
     return missing
 
 
-# ── Outbound reply emails ─────────────────────────────────────────────────────
 
 async def _send_reply_email(to_email: str, subject: str, body: str) -> None:
     try:

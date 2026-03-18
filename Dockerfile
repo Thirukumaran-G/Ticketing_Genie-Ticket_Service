@@ -12,4 +12,8 @@ RUN uv sync --frozen --no-dev \
 
 COPY . .
 
-CMD ["uv", "run", "python", "-m", "src.main"]
+ENV PATH="/app/.venv/bin:$PATH"
+
+RUN chmod +x /app/celery_worker.sh
+
+CMD ["python", "-m", "src.main"]

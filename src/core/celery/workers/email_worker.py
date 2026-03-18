@@ -1,13 +1,3 @@
-"""Email Celery worker — outbound emails only.
-
-Handles:
-  - send_ack         : acknowledgement to customer after ticket creation
-  - send_notification: generic notification to agent / team_lead / customer
-
-Email inbox polling has been removed — use a dedicated inbound handler
-(e.g. src.handlers.email_inbound) triggered externally if needed.
-"""
-
 from __future__ import annotations
 
 import asyncio

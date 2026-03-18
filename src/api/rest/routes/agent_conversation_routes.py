@@ -116,7 +116,7 @@ async def agent_post_comment(
                 ticket=ticket,
                 notif_type="agent_reply",
                 title=f"New reply on ticket {ticket.ticket_number}",
-                message=f"Your support agent has replied to ticket {ticket.ticket_number}.",
+                message=f"[{ticket.ticket_number}] Agent: {payload.content[:200]}",
                 is_internal=False,
                 email_subject=f"[{ticket.ticket_number}] New reply from your support agent",
                 email_body=(

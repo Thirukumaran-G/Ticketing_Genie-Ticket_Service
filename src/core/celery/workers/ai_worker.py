@@ -40,13 +40,16 @@ def run_ai_classification(self, ticket_id: str, customer_email: str | None = Non
     async def _run() -> dict:
         from src.control.agents.clasifier_agent import ClassifierAgent
         from src.data.clients.postgres_client import CelerySessionFactory
-        from src.data.repositories.ticket_repository import TicketRepository
+        from src.data.repositories.ticket_repository import TicketRepository, NotificationRepository
         from src.data.repositories.admin_repository import (
             SLARuleRepository, SeverityPriorityMapRepository, TierRepository,
         )
         from src.core.services.audit_service import audit_service
         from src.core.services.notification_service import NotificationService
         from src.config.settings import settings
+        from src.data.models.postgres.models import Notification
+        from src.core.sse.redis_subscriber import publish_notification
+        import uuid as _uuid
         from datetime import datetime, timezone, timedelta
 
         async with CelerySessionFactory() as session:
@@ -54,7 +57,7 @@ def run_ai_classification(self, ticket_id: str, customer_email: str | None = Non
             sla_repo  = SLARuleRepository(session)
             sev_repo  = SeverityPriorityMapRepository(session)
             tier_repo = TierRepository(session)
-            notif_svc = NotificationService(session)  # Celery — no BackgroundTasks
+            notif_svc = NotificationService(session)
 
             ticket = await repo.get_by_id(ticket_id)
             if not ticket:
@@ -109,6 +112,7 @@ def run_ai_classification(self, ticket_id: str, customer_email: str | None = Non
                 "override_reason":     result.reason if priority_overridden else None,
                 "sla_response_due":    sla_response_due,
                 "sla_resolve_due":     sla_resolve_due,
+                "status":              "acknowledged",
             }
             if ticket_embedding and ticket.ticket_embedding is None:
                 fields_to_update["ticket_embedding"] = ticket_embedding
@@ -142,27 +146,18 @@ def run_ai_classification(self, ticket_id: str, customer_email: str | None = Non
             except Exception as exc:
                 logger.warning("audit_classify_failed", ticket_id=ticket_id, error=str(exc))
 
-            if priority_overridden:
-                run_ai_priority_override.delay(
-                    ticket_id,
-                    ticket.customer_priority,
-                    system_priority,
-                    result.reason,
-                    customer_email,
-                    str(ticket.customer_id),
-                )
-
-            # ── new → acknowledged ─────────────────────────────────────────────
-            await repo.update_fields(ticket_id, {"status": "acknowledged"})
+            # ── Commit classification + acknowledged status ─────────────────
             await session.commit()
 
-            # Re-fetch ticket so notification sees updated state
+            # Re-fetch so notification sees updated state
             ticket = await repo.get_by_id(ticket_id)
 
-            # ── Acknowledge — ALWAYS email (transactional receipt) + in_app ────
+            # ── ticket_created notification — always in_app + email ────────
             sla_str = sla_response_due.strftime("%Y-%m-%d %H:%M UTC") if sla_response_due else "N/A"
             try:
                 resolved_email = customer_email or await _safe_fetch_email(ticket.customer_id)
+
+                # Email — transactional receipt, always send regardless of preference
                 if resolved_email:
                     from src.core.celery.workers.email_worker import send_notification_email
                     send_notification_email.delay(
@@ -185,10 +180,7 @@ def run_ai_classification(self, ticket_id: str, customer_email: str | None = Non
                         customer_email=resolved_email,
                     )
 
-                # Always also send in_app so customer sees it in the UI bell
-                from src.core.sse.redis_subscriber import publish_notification
-                from src.data.models.postgres.models import Notification
-                import uuid as _uuid
+                # In-app — always create so customer sees it in notification bell
                 notif = Notification(
                     channel="in_app",
                     recipient_id=_uuid.UUID(str(ticket.customer_id)),
@@ -201,10 +193,11 @@ def run_ai_classification(self, ticket_id: str, customer_email: str | None = Non
                         f"Expected response by: {sla_str}"
                     ),
                 )
-                from src.data.repositories.ticket_repository import NotificationRepository
                 notif_repo = NotificationRepository(session)
                 await notif_repo.create(notif)
-                await session.flush()
+                await session.commit()  # ← commit notification row
+
+                # Push SSE after commit so row is visible if client refetches
                 publish_notification(
                     settings.CELERY_BROKER_URL,
                     str(ticket.customer_id),
@@ -216,8 +209,24 @@ def run_ai_classification(self, ticket_id: str, customer_email: str | None = Non
                         "ticket_id":     str(ticket.id),
                     },
                 )
+                logger.info(
+                    "ticket_created_notif_saved",
+                    ticket_id=ticket_id,
+                    recipient_id=str(ticket.customer_id),
+                )
             except Exception as exc:
                 logger.warning("ticket_raise_notification_failed", error=str(exc))
+
+            # ── Priority override notification ─────────────────────────────
+            if priority_overridden:
+                run_ai_priority_override.delay(
+                    ticket_id,
+                    ticket.customer_priority,
+                    system_priority,
+                    result.reason,
+                    customer_email,
+                    str(ticket.customer_id),
+                )
 
             if ticket_embedding:
                 try:
@@ -230,7 +239,7 @@ def run_ai_classification(self, ticket_id: str, customer_email: str | None = Non
                 except Exception as exc:
                     logger.warning("similar_ticket_detection_failed", error=str(exc))
 
-        # Chain to auto-assign (drives acknowledged → assigned)
+        # Chain — runs after session closes
         run_auto_assign.delay(ticket_id, customer_email=customer_email)
         run_ai_draft.delay(ticket_id)
 
@@ -329,7 +338,7 @@ async def _do_assign(
 
     async with CelerySessionFactory() as session:
         ticket_repo = TicketRepository(session)
-        notif_svc   = NotificationService(session)  # Celery — no BackgroundTasks
+        notif_svc   = NotificationService(session)
 
         ticket = await ticket_repo.get_by_id(ticket_id)
         if not ticket:
@@ -412,7 +421,7 @@ async def _do_assign(
             agent_name     = await fetch_agent_name(best_member.user_id) or "Support Agent"
             resolved_email = customer_email or await _safe_fetch_email(ticket.customer_id)
 
-            # ── acknowledged → assigned ────────────────────────────────────────
+            # ── acknowledged → assigned ────────────────────────────────────
             await ticket_repo.update_fields(ticket_id, {
                 "team_id":     selected_team.id,
                 "assigned_to": best_member.user_id,
@@ -450,7 +459,7 @@ async def _do_assign(
             sla_str         = ticket.sla_response_due.strftime("%Y-%m-%d %H:%M UTC") if ticket.sla_response_due else "N/A"
             sla_resolve_str = ticket.sla_resolve_due.strftime("%Y-%m-%d %H:%M UTC")   if ticket.sla_resolve_due  else "N/A"
 
-            # ── Agent notification — preference-aware ──────────────────────────
+            # ── Agent notification ─────────────────────────────────────────
             await notif_svc.notify(
                 recipient_id=str(best_member.user_id),
                 ticket=ticket,
@@ -477,8 +486,9 @@ async def _do_assign(
                     f"— Ticketing Genie"
                 ),
             )
+            await session.commit()  # ← commit agent notification
 
-            # ── Customer notification — preference-aware ───────────────────────
+            # ── Customer notification ──────────────────────────────────────
             await notif_svc.notify(
                 recipient_id=str(ticket.customer_id),
                 ticket=ticket,
@@ -501,8 +511,9 @@ async def _do_assign(
                 ),
                 fallback_email=resolved_email,
             )
+            await session.commit()  # ← commit customer notification
 
-            # Push SSE queue update to agent
+            # Push SSE queue update to agent after all commits
             publish_queue_update(
                 settings.CELERY_BROKER_URL,
                 str(best_member.user_id),
@@ -653,8 +664,7 @@ def run_ai_priority_override(
             if not ticket:
                 return
 
-            # ── Preference-aware — email or in_app per customer setting ────────
-            notif_svc       = NotificationService(session)  # Celery — no BackgroundTasks
+            notif_svc       = NotificationService(session)
             abstract_reason = _abstract_priority_reason(original_severity, new_priority, reason)
             title           = f"Ticket {ticket.ticket_number} priority has been updated"
             message         = (
@@ -677,8 +687,14 @@ def run_ai_priority_override(
                 ),
                 fallback_email=customer_email,
             )
+            await session.commit()  # ← commit priority_updated notification
 
-    # Must use run_async (not asyncio.run) — consistent with all other Celery tasks
+            logger.info(
+                "priority_override_notif_saved",
+                ticket_id=ticket_id,
+                recipient_id=str(ticket.customer_id),
+            )
+
     run_async(_notify())
 
 

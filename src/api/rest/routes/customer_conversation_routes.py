@@ -186,7 +186,7 @@ async def customer_post_reply(
             ticket=ticket,
             notif_type="customer_reply",
             title=f"Customer replied on {ticket.ticket_number}",
-            message=f"Customer posted a new reply on ticket {ticket.ticket_number}.",
+            message=f"[{ticket.ticket_number}] Customer: {payload.message[:200]}",
             is_internal=False,
             email_subject=f"[{ticket.ticket_number}] New customer reply",
             email_body=(

@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     )
 
     LOG_LEVEL:              str
-    PORT:                   int
+    PORT:                   int = 8002
     SERVICE_NAME:           str
     DATABASE_URL:           str
     MONGO_URL:              str
@@ -30,15 +30,12 @@ class Settings(BaseSettings):
     SMTP_FROM_EMAIL:        str
     SMTP_FROM_NAME:         str
     EMAIL_FROM:             str = ""
-    PORTAL_URL:             str = "https://support.ticketinggenie.com"
+    PORTAL_URL:             str = "https://gtk-ticket-genie-frontend-717740758627.us-east1.run.app"
 
-    # IMAP host/port/mailbox stay in env.
-    # IMAP_USER and IMAP_PASSWORD live in ticket.email_config table only.
     IMAP_HOST:    str | None = None
     IMAP_PORT:    int        = 993
     IMAP_MAILBOX: str        = "INBOX"
 
-    # JWT
     JWT_SECRET_KEY: str = ""
     JWT_ALGORITHM:  str = "HS256"
 

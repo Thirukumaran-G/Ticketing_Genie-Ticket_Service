@@ -1,18 +1,3 @@
-"""
-Seed script — teams and team members (ticket.team, ticket.team_member)
-Run: uv run python -m src.scripts.seeders.team_seeder
-
-- 4 teams × 3 products = 12 teams total
-- Each team member gets skill_embedding (384-dim, all-MiniLM-L6-v2)
-- Skills stored as JSONB with skill_text (paragraph) + experience_years
-- Resolves product_code → product_id from auth.product
-- Resolves email → user_id from auth.user
-
-Prerequisites:
-  1. Run migration_team_member.sql on your DB
-  2. Create all agents via POST /api/v1/admin/users first
-"""
-
 from __future__ import annotations
 
 import asyncio

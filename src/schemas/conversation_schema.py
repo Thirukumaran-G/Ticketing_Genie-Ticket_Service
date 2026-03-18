@@ -56,10 +56,6 @@ class AttachmentItem(BaseModel):
     uploaded_by: Optional[uuid.UUID]
     created_at:  datetime
 
-    # Download URL is synthesised in the route, not stored in DB.
-    # Frontend uses:  GET /customer/tickets/{ticket_id}/attachments/{id}
-    #             or  GET /agent/tickets/{ticket_id}/attachments/{id}
-
 
 # ── Combined thread response ───────────────────────────────────────────────────
 
