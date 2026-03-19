@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -177,7 +177,6 @@ async def customer_post_reply(
         content=payload.message,
     )
 
-    # Notify assigned agent of customer reply
     ticket = await ticket_repo.get_by_id(ticket_id)
     if ticket and ticket.assigned_to:
         notif_svc = NotificationService(session, background_tasks)
@@ -280,17 +279,21 @@ async def customer_upload_attachment(
     return AttachmentItem.model_validate(attachment)
 
 
+# ── Download attachment — returns JSON { url: signed_url } ────────────────────
+# We return JSON instead of 302 redirect to avoid browser CORS blocks when the
+# frontend fetches the URL via XHR/fetch. The frontend uses the signed URL
+# directly as <img src> or window.open(), both of which bypass CORS.
+
 @router.get(
-    "/tickets/{ticket_id}/attachments/{attachment_id}",
-    summary="Customer — download / view an attachment",
-    response_class=FileResponse,
+    "/tickets/{ticket_id}/attachments/{attachment_id}/signed-url",
+    summary="Customer — get signed download URL for an attachment",
 )
-async def customer_get_attachment(
+async def customer_get_attachment_signed_url(
     ticket_id:     str,
     attachment_id: str,
     actor:         CurrentActor = _CustomerActor,
     session:       AsyncSession = Depends(get_db_session),
-) -> FileResponse:
+) -> dict:
     ticket_svc = TicketService(session)
     conv_svc   = ConversationService(session)
 
@@ -303,12 +306,5 @@ async def customer_get_attachment(
     if not attachment:
         raise HTTPException(status_code=404, detail="Attachment not found.")
 
-    abs_path = conv_svc.resolve_attachment_path(attachment.file_path)
-    if not abs_path.exists():
-        raise HTTPException(status_code=404, detail="File not found on server.")
-
-    return FileResponse(
-        path=str(abs_path),
-        filename=attachment.file_name,
-        media_type=attachment.mime_type or "application/octet-stream",
-    )
+    signed_url = conv_svc.get_download_url(attachment.file_path)
+    return {"url": signed_url}

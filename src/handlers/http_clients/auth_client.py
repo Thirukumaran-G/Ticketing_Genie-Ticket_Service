@@ -15,24 +15,6 @@ class AuthHttpClient:
         self._base_url = settings.AUTH_SERVICE_URL
         self._timeout  = 5.0
 
-    # ── Token validation ───────────────────────────────────────────────────────
-
-    async def validate_token(self, token: str) -> dict | None:
-        url = f"{self._base_url}/api/v1/auth/internal/validate"
-        try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                resp = await client.post(url, json={"refresh_token": token})
-            if resp.status_code == 200:
-                return resp.json()
-            logger.warning("auth_validate_token_failed", status=resp.status_code, detail=resp.text[:200])
-            return None
-        except httpx.TimeoutException:
-            logger.error("auth_validate_token_timeout", url=url)
-            return None
-        except Exception as exc:
-            logger.error("auth_validate_token_error", error=str(exc))
-            return None
-
     # ── User lookup ────────────────────────────────────────────────────────────
 
     async def get_user_by_id(self, user_id: str) -> dict | None:
@@ -58,6 +40,44 @@ class AuthHttpClient:
     async def get_customer_email(self, customer_id: str) -> str | None:
         """Alias used by EmailClient.resolve_email."""
         return await self.get_user_email(customer_id)
+
+    # ── Notification preference ───────────────────────────────────────────────
+
+    async def get_user(self, user_id: str) -> dict:
+        """GET /internal/users/{user_id} — includes preferred_contact field."""
+        url = f"{self._base_url}/api/v1/auth/internal/users/{user_id}"
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                resp = await client.get(url)
+            if resp.status_code == 200:
+                return resp.json()
+            logger.warning("auth_get_user_full_failed", user_id=user_id, status=resp.status_code)
+            return {}
+        except httpx.TimeoutException:
+            logger.error("auth_get_user_full_timeout", user_id=user_id)
+            return {}
+        except Exception as exc:
+            logger.error("auth_get_user_full_error", user_id=user_id, error=str(exc))
+            return {}
+
+    async def set_user_preferred_contact(self, user_id: str, value: str) -> None:
+        """PATCH /internal/users/{user_id}/preferred-contact"""
+        url = f"{self._base_url}/api/v1/auth/internal/users/{user_id}/preferred-contact"
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                resp = await client.patch(url, json={"preferred_contact": value})
+            if resp.status_code not in (200, 204):
+                logger.warning(
+                    "auth_set_preferred_contact_failed",
+                    user_id=user_id,
+                    status=resp.status_code,
+                )
+        except httpx.TimeoutException:
+            logger.error("auth_set_preferred_contact_timeout", user_id=user_id)
+        except Exception as exc:
+            logger.error("auth_set_preferred_contact_error", user_id=user_id, error=str(exc))
+
+    # ── Tiers / Products ──────────────────────────────────────────────────────
 
     async def get_tiers(self, token: str) -> list[dict]:
         """GET /api/v1/admin/tiers — list tiers from auth-service."""
@@ -86,4 +106,3 @@ class AuthHttpClient:
         except Exception as exc:
             logger.error("auth_get_products_error", error=str(exc))
             return []
-

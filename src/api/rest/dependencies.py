@@ -1,11 +1,3 @@
-"""
-FastAPI dependencies for ticket-service.
-
-JWT is validated via auth-service internal endpoint.
-Role names mirror auth-service seeded roles:
-  "customer" | "agent" | "team_lead" | "admin"
-"""
-
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -14,12 +6,11 @@ from typing import Any, Dict, Optional
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from src.handlers.http_clients.auth_client import AuthHttpClient
 from src.observability.logging.logger import get_logger
 
-logger = get_logger(__name__)
+from src.utils.jwt import decode_token
 
-# auto_error=False so we can fall back to cookie without a hard 403
+logger = get_logger(__name__)
 _bearer = HTTPBearer(auto_error=False)
 
 # ── Role constants ────────────────────────────────────────────────────────────
@@ -92,19 +83,12 @@ class CurrentActor:
             f"<CurrentActor id={self.actor_id} role={self.role_name} "
             f"email={self.email} company_id={self.company_id}>"
         )
-
-
-# ── Token extraction helper ───────────────────────────────────────────────────
+    
 
 def _extract_token(
     request:     Request,
     credentials: Optional[HTTPAuthorizationCredentials],
 ) -> str:
-    """
-    Extract bearer token from:
-    1. Authorization: Bearer <token>  header
-    2. access_token httpOnly cookie (set by auth-service on login/refresh)
-    """
     if credentials and credentials.credentials:
         return credentials.credentials
 
@@ -115,31 +99,42 @@ def _extract_token(
     raise HTTPException(status_code=401, detail="Missing authorization token.")
 
 
-# ── Core dependency ───────────────────────────────────────────────────────────
+def _validate_token_local(token: str) -> CurrentActor:
+    """
+    Decode and validate the JWT locally using the shared secret/public key.
+    Raises 401 if the token is invalid, expired, or not an access token.
+    """
+    try:
+        payload = decode_token(token)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired token.")
+
+    if payload.get("type") != "access":
+        raise HTTPException(status_code=401, detail="Access token required.")
+
+    return CurrentActor(
+        actor_id=str(payload["sub"]),
+        role_name=payload["role"],
+        email=payload.get("email"),
+        company_id=payload.get("company_id"),
+        product_tiers=payload.get("product_tiers") or {},
+    )
+
 
 async def get_current_actor(
     request:     Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
 ) -> CurrentActor:
-    """Validate Bearer JWT via auth-service and hydrate CurrentActor."""
     token = _extract_token(request, credentials)
-
-    auth_client = AuthHttpClient()
-    result = await auth_client.validate_token(token)
-
-    if not result or not result.get("valid"):
-        raise HTTPException(status_code=401, detail="Invalid or expired token.")
-
-    return CurrentActor(
-        actor_id=result["actor_id"],
-        role_name=result["role"],
-        email=result.get("email"),
-        company_id=result.get("company_id"),
-        product_tiers=result.get("product_tiers") or {},
-    )
+    return _validate_token_local(token)
 
 
-# ── Role guard ────────────────────────────────────────────────────────────────
+async def get_current_actor_from_token(token: str) -> CurrentActor:
+    """Used by SSE endpoint — token comes as query param, no cookie needed."""
+    return _validate_token_local(token)
+
+
+# ── Role guards ───────────────────────────────────────────────────────────────
 
 def require_role(*allowed_roles: str) -> Callable:
     async def _check(actor: CurrentActor = Depends(get_current_actor)) -> CurrentActor:
@@ -150,23 +145,6 @@ def require_role(*allowed_roles: str) -> Callable:
             )
         return actor
     return _check
-
-
-async def get_current_actor_from_token(token: str) -> CurrentActor:
-    """Used by SSE endpoint — token comes as query param, no cookie needed."""
-    auth_client = AuthHttpClient()
-    result = await auth_client.validate_token(token)
-
-    if not result or not result.get("valid"):
-        raise HTTPException(status_code=401, detail="Invalid or expired token.")
-
-    return CurrentActor(
-        actor_id=result["actor_id"],
-        role_name=result["role"],
-        email=result.get("email"),
-        company_id=result.get("company_id"),
-        product_tiers=result.get("product_tiers") or {},
-    )
 
 
 # ── Composite shorthand dependencies ─────────────────────────────────────────

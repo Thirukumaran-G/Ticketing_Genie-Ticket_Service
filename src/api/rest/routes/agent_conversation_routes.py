@@ -7,7 +7,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.rest.dependencies import CurrentActor, ROLE_AGENT, require_role
@@ -54,10 +53,10 @@ async def _assert_agent_owns_ticket(ticket_id: str, agent_id: str, agent_svc: Ag
     response_model=TicketThreadResponse,
 )
 async def agent_get_thread(
-    ticket_id:  str,
-    actor:      CurrentActor       = _AgentActor,
-    agent_svc:  AgentService       = Depends(_agent_svc),
-    conv_svc:   ConversationService = Depends(_conv_svc),
+    ticket_id: str,
+    actor:     CurrentActor        = _AgentActor,
+    agent_svc: AgentService        = Depends(_agent_svc),
+    conv_svc:  ConversationService = Depends(_conv_svc),
 ) -> TicketThreadResponse:
     await _assert_agent_owns_ticket(ticket_id, actor.actor_id, agent_svc)
     conversations = await conv_svc.get_thread(ticket_id=ticket_id, include_internal=True)
@@ -79,11 +78,11 @@ async def agent_post_comment(
     ticket_id:        str,
     payload:          AgentReplyRequest,
     background_tasks: BackgroundTasks,
-    actor:            CurrentActor       = _AgentActor,
-    agent_svc:        AgentService       = Depends(_agent_svc),
+    actor:            CurrentActor        = _AgentActor,
+    agent_svc:        AgentService        = Depends(_agent_svc),
     conv_svc:         ConversationService = Depends(_conv_svc),
-    ticket_repo:      TicketRepository   = Depends(_ticket_repo),
-    session:          AsyncSession       = Depends(get_db_session),
+    ticket_repo:      TicketRepository    = Depends(_ticket_repo),
+    session:          AsyncSession        = Depends(get_db_session),
 ) -> ConversationItem:
     if len(payload.content.strip()) < 1:
         raise HTTPException(status_code=422, detail="Content cannot be empty.")
@@ -98,7 +97,6 @@ async def agent_post_comment(
     )
 
     if not payload.is_internal:
-        # Stamp first_response_at + advance status if needed
         ticket = await ticket_repo.get_by_id(ticket_id)
         if ticket:
             updates: dict = {}
@@ -109,7 +107,6 @@ async def agent_post_comment(
             if updates:
                 await ticket_repo.update_fields(ticket_id, updates)
 
-            # Notify customer of agent reply per their preference
             notif_svc = NotificationService(session, background_tasks)
             await notif_svc.notify(
                 recipient_id=str(ticket.customer_id),
@@ -132,42 +129,54 @@ async def agent_post_comment(
 
 # ── Upload attachment ──────────────────────────────────────────────────────────
 
-@router.post("/agent/tickets/{ticket_id}/attachments", response_model=AttachmentItem, status_code=201)
+@router.post(
+    "/agent/tickets/{ticket_id}/attachments",
+    response_model=AttachmentItem,
+    status_code=201,
+)
 async def agent_upload_attachment(
-    ticket_id:  str,
-    file:       UploadFile         = File(...),
-    actor:      CurrentActor       = _AgentActor,
-    agent_svc:  AgentService       = Depends(_agent_svc),
-    conv_svc:   ConversationService = Depends(_conv_svc),
+    ticket_id: str,
+    file:      UploadFile         = File(...),
+    actor:     CurrentActor       = _AgentActor,
+    agent_svc: AgentService       = Depends(_agent_svc),
+    conv_svc:  ConversationService = Depends(_conv_svc),
 ) -> AttachmentItem:
     await _assert_agent_owns_ticket(ticket_id, actor.actor_id, agent_svc)
     file_bytes = await file.read()
     try:
         att = await conv_svc.upload_attachment(
-            ticket_id=ticket_id, uploader_id=actor.actor_id,
+            ticket_id=ticket_id,
+            uploader_id=actor.actor_id,
             filename=file.filename or "upload",
-            file_bytes=file_bytes, mime_type=file.content_type,
+            file_bytes=file_bytes,
+            mime_type=file.content_type,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     return AttachmentItem.model_validate(att)
 
 
-# ── Download attachment ────────────────────────────────────────────────────────
+# ── Download attachment — returns JSON { url: signed_url } ────────────────────
+# We return JSON instead of 302 redirect to avoid browser CORS blocks when the
+# frontend fetches the URL via XHR/fetch. The frontend uses the signed URL
+# directly as <img src> or window.open(), both of which bypass CORS.
 
-@router.get("/agent/tickets/{ticket_id}/attachments/{attachment_id}", response_class=FileResponse)
-async def agent_get_attachment(
+@router.get(
+    "/agent/tickets/{ticket_id}/attachments/{attachment_id}/signed-url",
+    response_model=None,
+)
+async def agent_get_attachment_signed_url(
     ticket_id:     str,
     attachment_id: str,
-    actor:         CurrentActor       = _AgentActor,
-    agent_svc:     AgentService       = Depends(_agent_svc),
+    actor:         CurrentActor        = _AgentActor,
+    agent_svc:     AgentService        = Depends(_agent_svc),
     conv_svc:      ConversationService = Depends(_conv_svc),
-) -> FileResponse:
+) -> dict:
     await _assert_agent_owns_ticket(ticket_id, actor.actor_id, agent_svc)
+
     att = await conv_svc.get_attachment_by_id(attachment_id, ticket_id)
     if not att:
         raise HTTPException(status_code=404, detail="Attachment not found.")
-    path = conv_svc.resolve_attachment_path(att.file_path)
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="File not found on server.")
-    return FileResponse(path=str(path), filename=att.file_name, media_type=att.mime_type or "application/octet-stream")
+
+    signed_url = conv_svc.get_download_url(att.file_path)
+    return {"url": signed_url}

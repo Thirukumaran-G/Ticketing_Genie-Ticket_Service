@@ -9,7 +9,7 @@ import json
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.rest.dependencies import CurrentActor, ROLE_TEAM_LEAD, require_role
@@ -200,29 +200,27 @@ async def tl_upload_attachment(
     return AttachmentItem.model_validate(att)
 
 
+# ── Download attachment — returns JSON { url: signed_url } ────────────────────
+# We return JSON instead of 302 redirect to avoid browser CORS blocks when the
+# frontend fetches the URL via XHR/fetch. The frontend uses the signed URL
+# directly as <img src> or window.open(), both of which bypass CORS.
+
 @router.get(
-    "/tickets/{ticket_id}/attachments/{attachment_id}",
-    response_class=FileResponse,
+    "/tickets/{ticket_id}/attachments/{attachment_id}/signed-url",
 )
-async def tl_get_attachment(
+async def tl_get_attachment_signed_url(
     ticket_id:     str,
     attachment_id: str,
     actor:         CurrentActor = _TLActor,
     session:       AsyncSession = Depends(get_db_session),
-) -> FileResponse:
+) -> dict:
     from src.core.services.conversation_service import ConversationService
     conv_svc = ConversationService(session)
     att      = await conv_svc.get_attachment_by_id(attachment_id, ticket_id)
     if not att:
         raise HTTPException(status_code=404, detail="Attachment not found.")
-    path = conv_svc.resolve_attachment_path(att.file_path)
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="File not found on server.")
-    return FileResponse(
-        path=str(path),
-        filename=att.file_name,
-        media_type=att.mime_type or "application/octet-stream",
-    )
+    signed_url = conv_svc.get_download_url(att.file_path)
+    return {"url": signed_url}
 
 
 # ── Customer info ─────────────────────────────────────────────────────────────
@@ -261,7 +259,6 @@ async def add_tl_internal_note(
     except Exception as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
-    # Notify assigned agent — no stale conversation_routes import
     try:
         from sqlalchemy import select
         from src.data.models.postgres.models import Ticket

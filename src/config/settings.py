@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     SMTP_FROM_NAME:         str
     EMAIL_FROM:             str = ""
     PORTAL_URL:             str = "https://gtk-ticket-genie-frontend-717740758627.us-east1.run.app"
+    GCS_ENABLED: str
+    GCS_PROJECT_ID: str
+    GCS_BUCKET_NAME: str
+    GCS_BUCKET_PREFIX: str
+    GCS_TARGET_SERVICE_ACCOUNT: str
 
     IMAP_HOST:    str | None = None
     IMAP_PORT:    int        = 993

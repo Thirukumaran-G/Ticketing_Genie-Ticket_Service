@@ -39,7 +39,7 @@ def _notif_repo(
 def _pref_repo(
     session: AsyncSession = Depends(get_db_session),
 ) -> NotificationPreferenceRepository:
-    return NotificationPreferenceRepository(session)
+    return NotificationPreferenceRepository()
 
 
 # ── Fetch notifications ───────────────────────────────────────────────────────

@@ -27,7 +27,7 @@ class NotificationService:
     ) -> None:
         self._session          = session
         self._background_tasks = background_tasks
-        self._pref_repo        = NotificationPreferenceRepository(session)
+        self._pref_repo        = NotificationPreferenceRepository()
         self._notif_repo       = NotificationRepository(session)
 
     async def notify(

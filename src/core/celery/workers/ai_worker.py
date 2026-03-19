@@ -1,7 +1,3 @@
-"""
-AI Celery worker.
-src/core/celery/workers/ai_worker.py
-"""
 from __future__ import annotations
 
 import asyncio
@@ -29,10 +25,6 @@ def _get_embedding_model():
         _embedding_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
         logger.info("embedding_model_loaded")
     return _embedding_model
-
-
-# ── AI Classification ─────────────────────────────────────────────────────────
-# Drives: new → acknowledged (first mail sent to customer)
 
 @celery_app.task(name="ticket.ai.classify", bind=True, max_retries=3)
 def run_ai_classification(self, ticket_id: str, customer_email: str | None = None) -> dict:
@@ -394,7 +386,7 @@ async def _do_assign(
             await session.commit()
             return {"routed": True, "reason": "no_members_in_team", "team_id": str(selected_team.id)}
 
-        ticket_embedding = _compute_ticket_embedding(ticket)
+        ticket_embedding = _compute_ticket_embedding(ticket) # future plan not for current usage
         workload_map     = await _get_workload_map(session, members)
 
         scored = sorted(
@@ -687,7 +679,7 @@ def run_ai_priority_override(
                 ),
                 fallback_email=customer_email,
             )
-            await session.commit()  # ← commit priority_updated notification
+            await session.commit()  
 
             logger.info(
                 "priority_override_notif_saved",

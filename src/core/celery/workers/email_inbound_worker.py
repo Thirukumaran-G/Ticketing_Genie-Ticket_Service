@@ -676,8 +676,10 @@ async def _save_attachments(
     attachments: list[dict],
 ) -> None:
     import uuid6
+    import base64
     from src.data.models.postgres.models import Attachment
-
+    from src.core.services.gcs_service import upload_attachment as gcs_upload
+ 
     for att in attachments:
         mime = (att.get("mime_type") or "").lower()
         if mime not in _SUPPORTED_ATTACHMENT_MIME:
@@ -687,23 +689,64 @@ async def _save_attachments(
                 filename=att.get("filename"),
             )
             continue
-
-        filename  = (att.get("filename") or "attachment")[:255]
-        data_b64  = att.get("data_b64") or ""
-        file_size = len(base64.b64decode(data_b64)) if data_b64 else 0
-
+ 
+        filename = (att.get("filename") or "attachment")[:255]
+        data_b64 = att.get("data_b64") or ""
+ 
+        if not data_b64:
+            logger.warning(
+                "inbound_email_attachment_empty_data",
+                filename=filename,
+                ticket_id=ticket_id,
+            )
+            continue
+ 
+        try:
+            file_bytes = base64.b64decode(data_b64)
+        except Exception as exc:
+            logger.warning(
+                "inbound_email_attachment_decode_failed",
+                filename=filename,
+                error=str(exc),
+            )
+            continue
+ 
+        # ── Upload to GCS — returns public URL ────────────────────────────────
+        try:
+            public_url = gcs_upload(
+                file_bytes=file_bytes,
+                filename=filename,
+                folder=f"tickets/{ticket_id}",
+                mime_type=mime,             # sets correct content_type on blob
+            )
+        except Exception as exc:
+            logger.error(
+                "inbound_email_attachment_gcs_upload_failed",
+                filename=filename,
+                ticket_id=ticket_id,
+                error=str(exc),
+            )
+            continue  # skip this attachment, don't fail the whole ticket
+ 
+        # ── Persist metadata — file_path = public URL ─────────────────────────
         attachment = Attachment(
             id=uuid6.uuid7(),
             ticket_id=_uuid.UUID(ticket_id),
             file_name=filename,
-            file_path=f"email_attachments/{ticket_id}/{filename}",
-            file_size=file_size,
+            file_path=public_url,           # ← public URL stored in DB
+            file_size=len(file_bytes),
             mime_type=mime[:100],
         )
         session.add(attachment)
-
+        logger.info(
+            "inbound_email_attachment_saved",
+            ticket_id=ticket_id,
+            filename=filename,
+            public_url=public_url,
+            file_size=len(file_bytes),
+        )
+ 
     await session.flush()
-
 
 # ── Email processing record ───────────────────────────────────────────────────
 
