@@ -315,6 +315,15 @@ class Ticket(Base):
         Integer, nullable=False, default=0,
         comment="Total minutes spent on_hold across all cycles — subtracted from SLA elapsed time"
     )
+    response_sla_warned_pct: Mapped[Optional[int]] = mapped_column(
+    Integer, nullable=True
+    )
+    resolution_sla_warned_pct: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True
+    )
+    escalation_notified_at: Mapped[Optional[datetime]] = mapped_column(
+    DateTime(timezone=True), nullable=True
+    )
     reopen_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     resolved_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True

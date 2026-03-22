@@ -1,7 +1,3 @@
-"""
-Team Lead routes.
-src/api/rest/routes/team_lead_routes.py
-"""
 from __future__ import annotations
 
 import asyncio
@@ -199,11 +195,6 @@ async def tl_upload_attachment(
         raise HTTPException(status_code=422, detail=str(exc))
     return AttachmentItem.model_validate(att)
 
-
-# ── Download attachment — returns JSON { url: signed_url } ────────────────────
-# We return JSON instead of 302 redirect to avoid browser CORS blocks when the
-# frontend fetches the URL via XHR/fetch. The frontend uses the signed URL
-# directly as <img src> or window.open(), both of which bypass CORS.
 
 @router.get(
     "/tickets/{ticket_id}/attachments/{attachment_id}/signed-url",

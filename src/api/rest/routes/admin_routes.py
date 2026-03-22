@@ -1,4 +1,3 @@
-# admin routes ticket service
 from __future__ import annotations
 
 import uuid
@@ -46,8 +45,7 @@ def _get_token(request: Request) -> str:
     return request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
 
 
-# ── Reference data from auth-service ─────────────────────────────────────────
-
+# list tiers
 @router.get("/tiers", summary="List tiers from auth-service")
 async def list_tiers(
     request: Request,
@@ -56,7 +54,7 @@ async def list_tiers(
 ) -> list[dict]:
     return await service.list_tiers(_get_token(request))
 
-
+# list products
 @router.get("/products", summary="List products from auth-service")
 async def list_products(
     request: Request,
@@ -66,8 +64,7 @@ async def list_products(
     return await service.list_products(_get_token(request))
 
 
-# ── Email Config ──────────────────────────────────────────────────────────────
-
+# list the email config
 @router.get(
     "/email-config",
     response_model=list[EmailConfigResponse],
@@ -80,11 +77,11 @@ async def list_email_config(
     configs = await service.list_email_config()
     return [EmailConfigResponse.model_validate(c) for c in configs]
 
-
+# update email congig
 @router.put(
     "/email-config",
     response_model=list[EmailConfigResponse],
-    summary="Bulk upsert email config — IMAP_USER and IMAP_PASSWORD only",
+    summary="upsert email config — IMAP_USER and IMAP_PASSWORD only",
 )
 async def upsert_email_config(
     payload: list[EmailConfigUpdateRequest],
@@ -94,6 +91,7 @@ async def upsert_email_config(
     configs = await service.upsert_email_config(payload, actor.actor_id)
     return [EmailConfigResponse.model_validate(c) for c in configs]
 
+# new email config
 @router.post(
     "/email-config",
     response_model=EmailConfigResponse,
@@ -114,6 +112,7 @@ async def create_email_config(
     return EmailConfigResponse.model_validate(config)
 
 
+# delete email config
 @router.delete(
     "/email-config/{key}",
     status_code=204,
@@ -129,8 +128,7 @@ async def delete_email_config(
     await service.delete_email_config(key, actor.actor_id)
 
 
-# ── SLA Rules ─────────────────────────────────────────────────────────────────
-
+# get sla rules 
 @router.get(
     "/sla-rules",
     response_model=list[SLARuleResponse],
@@ -144,6 +142,7 @@ async def list_sla_rules(
     return [SLARuleResponse.model_validate(r) for r in rules]
 
 
+# create new sla rule
 @router.post(
     "/sla-rules",
     response_model=SLARuleResponse,
@@ -159,6 +158,7 @@ async def upsert_sla_rule(
     return SLARuleResponse.model_validate(rule)
 
 
+# delete sla rule
 @router.delete(
     "/sla-rules/{rule_id}",
     status_code=204,
@@ -174,8 +174,7 @@ async def delete_sla_rule(
     await service.hard_delete_sla_rule(str(rule_id), actor.actor_id)
 
 
-# ── Severity / Priority Map ───────────────────────────────────────────────────
-
+# set severity-priority map
 @router.get(
     "/severity-priority-map",
     response_model=list[SeverityPriorityMapResponse],
@@ -189,6 +188,7 @@ async def list_severity_priority_map(
     return [SeverityPriorityMapResponse.model_validate(m) for m in mappings]
 
 
+# create new severity-priority mapping
 @router.post(
     "/severity-priority-map",
     response_model=SeverityPriorityMapResponse,
@@ -203,7 +203,7 @@ async def upsert_severity_priority_map(
     mapping = await service.upsert_severity_priority_map(payload, actor.actor_id)
     return SeverityPriorityMapResponse.model_validate(mapping)
 
-
+# delete severity-priority map
 @router.delete(
     "/severity-priority-map/{map_id}",
     status_code=204,
@@ -219,8 +219,7 @@ async def delete_severity_priority_map(
     await service.hard_delete_severity_priority_map(str(map_id), actor.actor_id)
 
 
-# ── Keyword Rules ─────────────────────────────────────────────────────────────
-
+# keyword rules
 @router.get(
     "/keyword-rules",
     response_model=list[KeywordRuleResponse],

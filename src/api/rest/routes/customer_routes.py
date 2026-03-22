@@ -1,7 +1,3 @@
-"""
-Customer ticket routes.
-src/api/rest/routes/customer_ticket_routes.py
-"""
 from __future__ import annotations
 
 import uuid as _uuid

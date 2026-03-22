@@ -1,14 +1,3 @@
-"""
-EmbedService — generates 384-dim sentence embeddings.
-
-Model: sentence-transformers/all-MiniLM-L6-v2
-Dim:   384
-Used for:
-  - ticket_embedding         on Ticket
-  - skill_embedding          on TeamMember
-  - agent_skill_embeddings   on Persona
-"""
-
 from __future__ import annotations
 
 import asyncio

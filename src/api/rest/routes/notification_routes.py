@@ -1,7 +1,3 @@
-"""
-Notification routes.
-src/api/rest/routes/notification_routes.py
-"""
 from __future__ import annotations
 
 import asyncio
@@ -68,10 +64,6 @@ async def get_unread_count(
     actor: CurrentActor = _AnyActor,
     repo:  NotificationRepository = Depends(_notif_repo),
 ) -> dict:
-    """
-    Lightweight endpoint for the notification badge in the sidebar.
-    Returns { "count": int } — only unread notifications.
-    """
     notifs = await repo.get_for_user(actor.actor_id, unread_only=True)
     return {"count": len(notifs)}
 
@@ -86,15 +78,6 @@ async def get_unread_count(
 async def notification_stream(
     token: str = Query(..., description="JWT — EventSource cannot send Authorization header"),
 ) -> StreamingResponse:
-    """
-    EventSource cannot send headers so JWT is passed as ?token=...
-
-    Events:
-      event: notification  → new notification for this user
-      event: read_receipt  → after PATCH /{id}/read
-      event: internal_note → internal note posted on a ticket
-      : keepalive          → every 30s
-    """
     actor = await get_current_actor_from_token(token)
 
     async def _stream():

@@ -26,7 +26,6 @@ _INTERNAL_ROLES = {ROLE_AGENT, ROLE_TEAM_LEAD, ROLE_ADMIN}
 # ── CurrentActor ──────────────────────────────────────────────────────────────
 
 class CurrentActor:
-    """Parsed, validated token claims for the current request actor."""
 
     def __init__(
         self,
@@ -100,10 +99,6 @@ def _extract_token(
 
 
 def _validate_token_local(token: str) -> CurrentActor:
-    """
-    Decode and validate the JWT locally using the shared secret/public key.
-    Raises 401 if the token is invalid, expired, or not an access token.
-    """
     try:
         payload = decode_token(token)
     except Exception:

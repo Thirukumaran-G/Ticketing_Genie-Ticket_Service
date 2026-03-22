@@ -1,7 +1,3 @@
-"""
-Email Extraction Agent — extracts structured ticket fields from raw inbound email.
-src/control/agents/email_extraction_agent.py
-"""
 from __future__ import annotations
 
 import asyncio
@@ -56,7 +52,7 @@ class EmailExtractionResult(BaseModel):
     environment: str | None = Field(
         description=(
             "Deployment environment: must be exactly one of: prod, stage, dev. "
-            "Map 'production' -> prod, 'staging' -> stage, 'development' -> dev. "
+            "Map 'production' -> production, 'staging' -> staging"
             "Return null if not mentioned."
         ),
         default=None,
@@ -64,12 +60,6 @@ class EmailExtractionResult(BaseModel):
 
 
 class EmailExtractionAgent:
-    """
-    Extracts structured ticket fields from a raw inbound email (subject + body).
-    Valid product names are injected into the prompt so the LLM picks
-    the closest match rather than hallucinating.
-    """
-
     BASE_SYSTEM_PROMPT = """You are an expert support ticket intake specialist.
 
 Your job is to extract structured information from an inbound support email.
@@ -83,7 +73,7 @@ Extraction rules:
 - product_name : must match one of the valid products above EXACTLY (same spelling); null if none match
 - severity     : infer from content — critical (outage/data loss), high (major feature broken),
                  medium (partial issue with workaround), low (minor/question); null if unclear
-- environment  : prod / stage / dev only; null if not mentioned
+- environment  : production / stage / dev only; null if not mentioned
 
 Return ONLY the structured fields. Do not add commentary."""
 
@@ -113,19 +103,6 @@ Return ONLY the structured fields. Do not add commentary."""
         body: str,
         valid_products: list[str],
     ) -> EmailExtractionResult:
-        """
-        Extract ticket fields from raw email subject + body.
-
-        Args:
-            subject:        Raw email subject string.
-            body:           Cleaned email body string.
-            valid_products: List of active product names from auth.product.
-                            Both these and the LLM output are lowercased for matching
-                            by the caller — the LLM is just guided toward valid names.
-
-        Returns:
-            EmailExtractionResult with extracted fields.
-        """
         if not settings.GROQ_API_KEY:
             logger.warning("groq_api_key_missing_email_extraction")
             return EmailExtractionResult(

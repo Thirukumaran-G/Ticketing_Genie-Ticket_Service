@@ -78,6 +78,7 @@ Return ONLY severity and a brief reason. Do NOT determine priority — that is h
         ])
         return prompt | llm.with_structured_output(ClassificationResult)
 
+    # classifier agent with retry logic 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     async def classify(
         self,
@@ -94,12 +95,14 @@ Return ONLY severity and a brief reason. Do NOT determine priority — that is h
         try:
             chain = self._get_chain(product_description)
 
+            # Wraps the blocking chain.invoke() in a closure
             def _invoke() -> ClassificationResult:
                 result = chain.invoke({"title": title, "description": description})
                 if not isinstance(result, ClassificationResult):
                     raise TypeError(f"Unexpected classifier output: {type(result)}")
                 return result
-
+            
+            # Runs _invoke() in a thread — non-blocking from event loop's perspective
             result: ClassificationResult = await asyncio.to_thread(_invoke)
             logger.info("ticket_classified_llm", severity=result.severity)
             return result
@@ -119,10 +122,6 @@ Return ONLY severity and a brief reason. Do NOT determine priority — that is h
         product_id:  str | None,
         session,
     ) -> ClassificationResult:
-        """
-        Query ticket.keyword_rule for this product, match against ticket text,
-        return highest matched severity. Defaults to 'low' if nothing matches.
-        """
         text_blob = (title + " " + description).lower()
 
         if session is None or product_id is None:

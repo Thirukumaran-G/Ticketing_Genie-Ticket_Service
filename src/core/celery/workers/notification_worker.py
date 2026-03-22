@@ -1,28 +1,46 @@
 from __future__ import annotations
 
-import asyncio
-
 from src.core.celery.app import celery_app
+from src.core.celery.loop import run_async
 from src.observability.logging.logger import get_logger
 
 logger = get_logger(__name__)
 
 
-@celery_app.task(name="ticket.notification.alert_team_lead")
-def alert_team_lead(
-    ticket_id:        str,
-    ticket_number:    str,
-    title:            str,
-    priority:         str,
-    severity:         str,
-    assigned_to:      str,
-    assigned_to_name: str,
-    team_lead_id:     str,
-    reason:           str,
+# ── Universal notification delivery ──────────────────────────────────────────
+#
+# Single delivery layer for ALL notifications across the entire Celery app.
+#
+# sla_worker  → notify_recipient.delay()
+# ai_worker   → notify_recipient.delay()
+#
+# Checks recipient's channel preference from the repository.
+# Delivers via in_app (SSE + DB row) OR email_worker — never both.
+#
+# Exception: ticket_raised to customer always delivers both in_app + email
+# as a transactional receipt. That is handled directly in ai_worker and
+# does not go through this task.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@celery_app.task(name="ticket.notification.notify_recipient")
+def notify_recipient(
+    recipient_id:   str,
+    recipient_type: str,    # "agent" | "team_lead" | "customer"
+    ticket_id:      str,
+    ticket_number:  str,
+    notif_type:     str,
+    title:          str,
+    message:        str,
+    email_subject:  str,
+    email_body:     str,
+    is_internal:    bool,
 ) -> None:
     """
-    Notify only the specific team's team lead about a critical ticket assignment.
-    Fully preference-aware — in_app OR email, same message content, not both.
+    Universal notification delivery.
+
+    Fetches the recipient's preferred channel from the repository.
+    Delivers in_app (SSE push + DB row) OR queues an email via email_worker.
+    Never both.
     """
 
     async def _run() -> None:
@@ -39,94 +57,99 @@ def alert_team_lead(
             notif_repo = NotificationRepository(session)
             pref_repo  = NotificationPreferenceRepository(session)
 
-            # Fetch ticket for relationship
+            # Verify ticket exists
             result = await session.execute(
                 select(Ticket).where(Ticket.id == _uuid.UUID(ticket_id))
             )
             ticket = result.scalar_one_or_none()
             if not ticket:
-                logger.warning("alert_team_lead_ticket_not_found", ticket_id=ticket_id)
+                logger.warning(
+                    "notify_recipient_ticket_not_found",
+                    ticket_id=ticket_id,
+                    recipient_id=recipient_id,
+                )
                 return
 
-            notif_title   = f"[P0] Critical ticket {ticket_number} assigned"
-            notif_message = (
-                f"Title: {title}\n"
-                f"Priority: {priority} | Severity: {severity}\n"
-                f"Assigned to: {assigned_to_name}\n"
-                f"{reason}"
-            )
-
+            # Fetch channel preference
             try:
-                channel = await pref_repo.get_preferred_contact(team_lead_id)
+                channel = await pref_repo.get_preferred_contact(recipient_id)
             except Exception as exc:
                 logger.warning(
-                    "alert_team_lead_pref_fetch_failed",
-                    team_lead_id=team_lead_id,
+                    "notify_recipient_pref_fetch_failed",
+                    recipient_id=recipient_id,
+                    recipient_type=recipient_type,
                     error=str(exc),
                 )
                 channel = "in_app"  # safe default
 
             if channel == "in_app":
+                # ── In-app delivery ───────────────────────────────────────────
                 notif = Notification(
                     channel="in_app",
-                    recipient_id=_uuid.UUID(team_lead_id),
+                    recipient_id=_uuid.UUID(recipient_id),
                     ticket_id=_uuid.UUID(ticket_id),
-                    is_internal=True,
-                    type="critical_ticket_assigned",
-                    title=notif_title,
-                    message=notif_message,
+                    is_internal=is_internal,
+                    type=notif_type,
+                    title=title,
+                    message=message,
                 )
                 await notif_repo.create(notif)
                 await session.commit()
 
                 publish_notification(
                     settings.CELERY_BROKER_URL,
-                    team_lead_id,
+                    recipient_id,
                     {
-                        "type":          "critical_ticket_assigned",
-                        "title":         notif_title,
-                        "message":       notif_message,
+                        "type":          notif_type,
+                        "title":         title,
+                        "message":       message,
                         "ticket_number": ticket_number,
+                        "ticket_id":     ticket_id,
                     },
                 )
+                logger.info(
+                    "notify_recipient_in_app_delivered",
+                    recipient_id=recipient_id,
+                    recipient_type=recipient_type,
+                    notif_type=notif_type,
+                    ticket_number=ticket_number,
+                )
+
             else:
-                # email
+                # ── Email delivery ────────────────────────────────────────────
                 try:
                     from src.core.celery.utils import fetch_user_email
-                    lead_email = await fetch_user_email(_uuid.UUID(team_lead_id))
+                    email_addr = await fetch_user_email(_uuid.UUID(recipient_id))
                 except Exception as exc:
                     logger.warning(
-                        "alert_team_lead_email_fetch_failed",
-                        team_lead_id=team_lead_id,
+                        "notify_recipient_email_fetch_failed",
+                        recipient_id=recipient_id,
                         error=str(exc),
                     )
-                    lead_email = None
+                    email_addr = None
 
-                if lead_email:
+                if email_addr:
                     from src.core.celery.workers.email_worker import send_notification_email
                     send_notification_email.delay(
-                        recipient_id=team_lead_id,
-                        recipient_type="persona",
-                        subject=f"[P0] Critical ticket {ticket_number} assigned — heads up",
-                        body=(
-                            f"Hi,\n\n"
-                            f"A critical ticket has been auto-assigned.\n\n"
-                            f"Ticket:      {ticket_number}\n"
-                            f"Title:       {title}\n"
-                            f"Priority:    {priority}\n"
-                            f"Severity:    {severity}\n"
-                            f"Assigned to: {assigned_to_name}\n\n"
-                            f"{reason}\n\n"
-                            f"— Ticketing Genie"
-                        ),
-                        recipient_email=lead_email,
+                        recipient_id=recipient_id,
+                        recipient_type=recipient_type,
+                        subject=email_subject,
+                        body=email_body,
+                        recipient_email=email_addr,
+                    )
+                    logger.info(
+                        "notify_recipient_email_queued",
+                        recipient_id=recipient_id,
+                        recipient_type=recipient_type,
+                        notif_type=notif_type,
+                        ticket_number=ticket_number,
+                    )
+                else:
+                    logger.warning(
+                        "notify_recipient_email_skipped_no_address",
+                        recipient_id=recipient_id,
+                        recipient_type=recipient_type,
+                        ticket_number=ticket_number,
                     )
 
-            logger.info(
-                "critical_ticket_team_lead_notified",
-                team_lead_id=team_lead_id,
-                ticket_id=ticket_id,
-                channel=channel,
-            )
-
-    asyncio.run(_run())
+    run_async(_run())

@@ -1,4 +1,3 @@
-# customer_conversation_routes.py
 from __future__ import annotations
 
 import uuid
@@ -278,11 +277,6 @@ async def customer_upload_attachment(
 
     return AttachmentItem.model_validate(attachment)
 
-
-# ── Download attachment — returns JSON { url: signed_url } ────────────────────
-# We return JSON instead of 302 redirect to avoid browser CORS blocks when the
-# frontend fetches the URL via XHR/fetch. The frontend uses the signed URL
-# directly as <img src> or window.open(), both of which bypass CORS.
 
 @router.get(
     "/tickets/{ticket_id}/attachments/{attachment_id}/signed-url",

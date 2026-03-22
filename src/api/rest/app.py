@@ -38,7 +38,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     async with engine.begin() as conn:
         await conn.execute(text("CREATE SCHEMA IF NOT EXISTS ticket"))
-        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))  # ← added
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector")) 
         await conn.run_sync(Base.metadata.create_all)
     logger.info("database_tables_created")
 

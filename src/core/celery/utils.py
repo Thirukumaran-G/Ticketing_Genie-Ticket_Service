@@ -165,11 +165,6 @@ async def fetch_agent_name(user_id) -> str | None:
 
 
 async def fetch_product_info(product_id: str) -> tuple[str | None, str | None]:
-    """
-    Fetch (name, description) for a product directly from auth.product.
-    Same DB instance, cross-schema query via CelerySessionFactory.
-    Returns (None, None) on any error.
-    """
     import uuid as _uuid
     from sqlalchemy import select, text
 

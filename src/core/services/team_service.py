@@ -87,7 +87,7 @@ class TeamService:
         if payload.skill_text:
             skills_dict = {"skill_text": payload.skill_text}
             try:
-                from src.core.services.embedding_service import embed_text
+                from src.core.services.embed_service import embed_text
                 embedding = await embed_text(payload.skill_text)
             except Exception as exc:
                 logger.warning(
@@ -128,6 +128,6 @@ class TeamService:
         member = await self._member_repo.get_by_id(member_id)
         if not member:
             raise NotFoundException(f"Team member {member_id} not found.")
-        await self._member_repo.hard_delete(member_id)   # ← was deactivate()
+        await self._member_repo.hard_delete(member_id) 
         await self._session.commit()
         logger.info("team_member_hard_deleted", member_id=member_id, actor_id=actor_id)
