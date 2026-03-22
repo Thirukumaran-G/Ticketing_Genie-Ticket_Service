@@ -221,3 +221,4 @@ venv/
 .DS_Store
 Thumbs.db
 env.yaml
+workforce-login-config.json
