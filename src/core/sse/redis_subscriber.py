@@ -1,19 +1,4 @@
-"""
-Redis pub/sub bridge — Celery workers publish here, FastAPI process subscribes
-and fans out to connected SSE clients via sse_manager.
-
-Channels:
-  sse:notifications:{actor_id}  → "notification" events
-  sse:queue_updates:{actor_id}  → "queue_update" events
-
-Celery-side helpers (sync, run inside asyncio.run()):
-  publish_notification(broker_url, actor_id, data)
-  publish_queue_update(broker_url, actor_id, data)
-  publish_internal_note(broker_url, actor_id, data)
-
-FastAPI-side:
-  start_redis_listener(app)  — called on startup, runs listener as background task
-"""
+# reddis subscriber.py
 
 from __future__ import annotations
 
@@ -26,7 +11,6 @@ from src.observability.logging.logger import get_logger
 logger = get_logger(__name__)
 
 _NOTIFICATION_CHANNEL_PREFIX = "sse:notifications:"
-_QUEUE_UPDATE_CHANNEL_PREFIX  = "sse:queue_updates:"
 _INTERNAL_NOTE_CHANNEL_PREFIX = "sse:internal_notes:"
 
 
@@ -63,19 +47,6 @@ def publish_notification(
     )
 
 
-def publish_queue_update(
-    broker_url: str,
-    actor_id:   str,
-    data:       dict,
-) -> None:
-    """Push a queue_update event to a specific user (agent or TL)."""
-    _sync_publish(
-        broker_url,
-        f"{_QUEUE_UPDATE_CHANNEL_PREFIX}{actor_id}",
-        {"event": "queue_update", "data": data},
-    )
-
-
 def publish_internal_note(
     broker_url: str,
     actor_id:   str,
@@ -103,7 +74,6 @@ async def _redis_listener(broker_url: str) -> None:
 
     PATTERNS = [
         f"{_NOTIFICATION_CHANNEL_PREFIX}*",
-        f"{_QUEUE_UPDATE_CHANNEL_PREFIX}*",
         f"{_INTERNAL_NOTE_CHANNEL_PREFIX}*",
     ]
 
@@ -164,7 +134,6 @@ def _extract_actor_id(channel: str) -> str | None:
     """
     for prefix in (
         _NOTIFICATION_CHANNEL_PREFIX,
-        _QUEUE_UPDATE_CHANNEL_PREFIX,
         _INTERNAL_NOTE_CHANNEL_PREFIX,
     ):
         if channel.startswith(prefix):
@@ -173,17 +142,6 @@ def _extract_actor_id(channel: str) -> str | None:
 
 
 def start_redis_listener(app: Any) -> None:
-    """
-    Register Redis listener as a FastAPI lifespan background task.
-    Call this from the FastAPI app startup event or lifespan context.
-
-    Usage in main.py / app.py:
-        from src.core.sse.redis_subscriber import start_redis_listener
-
-        @app.on_event("startup")
-        async def startup():
-            start_redis_listener(app)
-    """
     from src.config.settings import settings
 
     async def _start():

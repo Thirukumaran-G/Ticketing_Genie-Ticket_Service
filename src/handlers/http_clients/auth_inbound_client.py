@@ -1,13 +1,3 @@
-"""
-Auth service HTTP client for inbound email worker.
-src/handlers/http_clients/auth_inbound_client.py
-
-Wraps the three new internal auth-service endpoints needed
-by the email inbound pipeline:
-  - GET  /internal/products/active
-  - GET  /internal/companies/by-domain/{domain}
-  - POST /internal/customers/create-or-get
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -135,12 +125,6 @@ class AuthInboundClient:
         full_name:  str,
         company_id: str,
     ) -> CustomerResult | None:
-        """
-        Create a new customer user in auth-service, or return the existing one.
-        - New user:      returns populated temp_password + is_new=True
-        - Existing user: returns is_new=False, temp_password=""
-        Returns None on any error.
-        """
         url = f"{_BASE}/internal/customers/create-or-get"
         payload = {
             "email":             email.lower().strip(),

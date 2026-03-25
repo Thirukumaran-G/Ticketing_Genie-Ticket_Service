@@ -41,8 +41,6 @@ class AuthHttpClient:
         """Alias used by EmailClient.resolve_email."""
         return await self.get_user_email(customer_id)
 
-    # ── Notification preference ───────────────────────────────────────────────
-
     async def get_user(self, user_id: str) -> dict:
         """GET /internal/users/{user_id} — includes preferred_contact field."""
         url = f"{self._base_url}/api/v1/auth/internal/users/{user_id}"

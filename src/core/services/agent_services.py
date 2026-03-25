@@ -13,6 +13,7 @@ from fastapi import BackgroundTasks
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+        # Matches full status machine — no 'open', includes 'assigned' and 'reopened'
 from src.data.models.postgres.models import Conversation, Notification, Team, Ticket
 from src.data.repositories.ticket_repository import TicketRepository
 from src.core.services.notification_service import NotificationService

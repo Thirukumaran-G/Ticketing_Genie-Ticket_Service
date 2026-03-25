@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from fastapi.responses import StreamingResponse
-from sqlalchemy.ext.asyncio import AsyncSession
-from pydantic import BaseModel
 from typing import Literal
+
+from fastapi import APIRouter, Depends, Query, Response
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.rest.dependencies import (
     CurrentActor,
@@ -15,30 +15,21 @@ from src.api.rest.dependencies import (
     get_current_actor_from_token,
 )
 from src.core.sse.sse_manager import sse_manager
+from src.core.services.notification_service import NotificationService
 from src.data.clients.postgres_client import get_db_session
-from src.data.repositories.ticket_repository import NotificationRepository
-from src.data.repositories.notification_preference_repository import NotificationPreferenceRepository
-from src.schemas.ticket_schema import NotificationResponse
 from src.schemas.notification_preference_schema import NotificationPreferenceResponse
+from src.schemas.ticket_schema import NotificationResponse
 
 router = APIRouter(prefix="/notifications", tags=["Notifications"])
 
 _AnyActor = Depends(get_current_actor)
 
 
-def _notif_repo(
-    session: AsyncSession = Depends(get_db_session),
-) -> NotificationRepository:
-    return NotificationRepository(session)
+def _svc(session: AsyncSession = Depends(get_db_session)) -> NotificationService:
+    return NotificationService(session)
 
 
-def _pref_repo(
-    session: AsyncSession = Depends(get_db_session),
-) -> NotificationPreferenceRepository:
-    return NotificationPreferenceRepository()
-
-
-# ── Fetch notifications ───────────────────────────────────────────────────────
+# ── Fetch ─────────────────────────────────────────────────────────────────────
 
 @router.get(
     "",
@@ -47,28 +38,24 @@ def _pref_repo(
 )
 async def list_notifications(
     unread_only: bool = False,
-    actor: CurrentActor = _AnyActor,
-    repo: NotificationRepository = Depends(_notif_repo),
+    actor: CurrentActor      = _AnyActor,
+    svc:   NotificationService = Depends(_svc),
 ) -> list[NotificationResponse]:
-    notifs = await repo.get_for_user(actor.actor_id, unread_only=unread_only)
-    return [NotificationResponse.model_validate(n) for n in notifs]
+    return await svc.list_notifications(actor.actor_id, unread_only=unread_only)
 
 
-# ── Unread count (for sidebar badge) ─────────────────────────────────────────
+# ── Unread count ──────────────────────────────────────────────────────────────
 
 @router.get(
     "/unread-count",
     summary="Get count of unread notifications for current user",
 )
 async def get_unread_count(
-    actor: CurrentActor = _AnyActor,
-    repo:  NotificationRepository = Depends(_notif_repo),
+    actor: CurrentActor      = _AnyActor,
+    svc:   NotificationService = Depends(_svc),
 ) -> dict:
-    notifs = await repo.get_for_user(actor.actor_id, unread_only=True)
-    return {"count": len(notifs)}
+    return {"count": await svc.get_unread_count(actor.actor_id)}
 
-
-# ── SSE stream ────────────────────────────────────────────────────────────────
 
 @router.get(
     "/stream",
@@ -85,8 +72,8 @@ async def notification_stream(
             while True:
                 try:
                     payload = await asyncio.wait_for(q.get(), timeout=30)
-                    event = payload["event"]
-                    data  = json.dumps(payload["data"])
+                    event   = payload["event"]
+                    data    = json.dumps(payload["data"])
                     yield f"event: {event}\ndata: {data}\n\n"
                 except asyncio.TimeoutError:
                     yield ": keepalive\n\n"
@@ -115,26 +102,13 @@ async def notification_stream(
 )
 async def mark_notification_read(
     notif_id: str,
-    actor:    CurrentActor = _AnyActor,
-    repo:     NotificationRepository = Depends(_notif_repo),
-    session:  AsyncSession = Depends(get_db_session),
+    actor:    CurrentActor      = _AnyActor,
+    svc:      NotificationService = Depends(_svc),
 ) -> None:
-    updated = await repo.mark_read(notif_id, actor.actor_id)
-    if not updated:
-        raise HTTPException(status_code=404, detail="Notification not found.")
-    await session.commit()
-
-    # ── Fixed: new sse_manager.push() takes (actor_id, payload: dict) ─────────
-    await sse_manager.push(
-        actor.actor_id,
-        {
-            "event": "read_receipt",
-            "data":  {"id": notif_id, "is_read": True},
-        },
-    )
+    await svc.mark_read(notif_id, actor.actor_id)
 
 
-# ── Notification preference ───────────────────────────────────────────────────
+# ── Preferences ───────────────────────────────────────────────────────────────
 
 class SetPreferenceRequest(BaseModel):
     preferred_contact: Literal["email", "in_app"]
@@ -146,14 +120,10 @@ class SetPreferenceRequest(BaseModel):
     summary="Get current user's notification preference",
 )
 async def get_preference(
-    actor: CurrentActor = _AnyActor,
-    repo:  NotificationPreferenceRepository = Depends(_pref_repo),
+    actor: CurrentActor      = _AnyActor,
+    svc:   NotificationService = Depends(_svc),
 ) -> NotificationPreferenceResponse:
-    channel = await repo.get_preferred_contact(actor.actor_id)
-    return NotificationPreferenceResponse(
-        user_id=actor.actor_id,
-        preferred_contact=channel,
-    )
+    return await svc.get_preference(actor.actor_id)
 
 
 @router.put(
@@ -162,17 +132,11 @@ async def get_preference(
     summary="Set current user's notification preference",
 )
 async def set_preference(
-    body:    SetPreferenceRequest,
-    actor:   CurrentActor = _AnyActor,
-    repo:    NotificationPreferenceRepository = Depends(_pref_repo),
-    session: AsyncSession = Depends(get_db_session),
+    body:  SetPreferenceRequest,
+    actor: CurrentActor      = _AnyActor,
+    svc:   NotificationService = Depends(_svc),
 ) -> NotificationPreferenceResponse:
-    await repo.set_preferred_contact(actor.actor_id, body.preferred_contact)
-    await session.commit()
-    return NotificationPreferenceResponse(
-        user_id=actor.actor_id,
-        preferred_contact=body.preferred_contact,
-    )
+    return await svc.set_preference(actor.actor_id, body.preferred_contact)
 
 
 @router.patch(
@@ -181,15 +145,7 @@ async def set_preference(
     summary="Toggle notification preference email ↔ in_app",
 )
 async def toggle_preference(
-    actor:   CurrentActor = _AnyActor,
-    repo:    NotificationPreferenceRepository = Depends(_pref_repo),
-    session: AsyncSession = Depends(get_db_session),
+    actor: CurrentActor      = _AnyActor,
+    svc:   NotificationService = Depends(_svc),
 ) -> NotificationPreferenceResponse:
-    current     = await repo.get_preferred_contact(actor.actor_id)
-    new_channel = "email" if current == "in_app" else "in_app"
-    await repo.set_preferred_contact(actor.actor_id, new_channel)
-    await session.commit()
-    return NotificationPreferenceResponse(
-        user_id=actor.actor_id,
-        preferred_contact=new_channel,
-    )
+    return await svc.toggle_preference(actor.actor_id)

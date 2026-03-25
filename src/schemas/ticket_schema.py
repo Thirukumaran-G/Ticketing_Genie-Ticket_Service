@@ -98,6 +98,7 @@ class TicketDetailResponse(BaseModel):
     ticket_number:           str
     title:                   Optional[str]         = None
     description:             Optional[str]         = None
+    product_id: Optional[uuid.UUID]
     status:                  str
     severity:                Optional[str]         = None
     priority:                Optional[str]         = None

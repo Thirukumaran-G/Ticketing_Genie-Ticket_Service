@@ -1,19 +1,18 @@
-"""
-Central notification service.
-src/core/services/notification_service.py
-"""
 from __future__ import annotations
 
 import uuid as _uuid
-from typing import Optional
+from typing import Literal, Optional
 
-from fastapi import BackgroundTasks
+from fastapi import BackgroundTasks, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.core.sse.sse_manager import sse_manager
 from src.data.models.postgres.models import Notification
 from src.data.repositories.notification_preference_repository import NotificationPreferenceRepository
 from src.data.repositories.ticket_repository import NotificationRepository
 from src.observability.logging.logger import get_logger
+from src.schemas.notification_preference_schema import NotificationPreferenceResponse
+from src.schemas.ticket_schema import NotificationResponse
 
 logger = get_logger(__name__)
 
@@ -30,6 +29,7 @@ class NotificationService:
         self._pref_repo        = NotificationPreferenceRepository()
         self._notif_repo       = NotificationRepository(session)
 
+
     async def notify(
         self,
         *,
@@ -38,10 +38,10 @@ class NotificationService:
         notif_type:     str,
         title:          str,
         message:        str,
-        is_internal:    bool        = False,
-        email_subject:  str | None  = None,
-        email_body:     str | None  = None,
-        fallback_email: str | None  = None,
+        is_internal:    bool       = False,
+        email_subject:  str | None = None,
+        email_body:     str | None = None,
+        fallback_email: str | None = None,
     ) -> None:
         try:
             channel = await self._pref_repo.get_preferred_contact(recipient_id)
@@ -114,7 +114,6 @@ class NotificationService:
 
             if self._background_tasks is not None:
                 # FastAPI route context — direct push to in-process SSE manager
-                from src.core.sse.sse_manager import sse_manager
                 delivered = await sse_manager.push(recipient_id, payload)
                 logger.info(
                     "notify_in_app_sent",
@@ -201,6 +200,86 @@ class NotificationService:
                 error=str(exc),
             )
 
+    # ── Fetch ─────────────────────────────────────────────────────────────────
+
+    async def list_notifications(
+        self, actor_id: str, unread_only: bool = False
+    ) -> list[NotificationResponse]:
+        notifs = await self._notif_repo.get_for_user(actor_id, unread_only=unread_only)
+        return [NotificationResponse.model_validate(n) for n in notifs]
+
+    async def get_unread_count(self, actor_id: str) -> int:
+        notifs = await self._notif_repo.get_for_user(actor_id, unread_only=True)
+        return len(notifs)
+
+    # ── Mark as read ──────────────────────────────────────────────────────────
+
+    async def mark_read(self, notif_id: str, actor_id: str) -> None:
+        updated = await self._notif_repo.mark_read(notif_id, actor_id)
+        if not updated:
+            raise HTTPException(status_code=404, detail="Notification not found.")
+
+        await self._session.commit()
+
+        await sse_manager.push(
+            actor_id,
+            {
+                "event": "read_receipt",
+                "data":  {"id": notif_id, "is_read": True},
+            },
+        )
+
+        logger.info("notification_marked_read", notif_id=notif_id, actor_id=actor_id)
+
+    # ── Preferences ───────────────────────────────────────────────────────────
+
+    async def get_preference(self, actor_id: str) -> NotificationPreferenceResponse:
+        channel = await self._pref_repo.get_preferred_contact(actor_id)
+        return NotificationPreferenceResponse(
+            user_id=actor_id,
+            preferred_contact=channel,
+        )
+
+    async def set_preference(
+        self,
+        actor_id:          str,
+        preferred_contact: Literal["email", "in_app"],
+    ) -> NotificationPreferenceResponse:
+        await self._pref_repo.set_preferred_contact(actor_id, preferred_contact)
+        await self._session.commit()
+
+        logger.info(
+            "notification_preference_set",
+            actor_id=actor_id,
+            preferred_contact=preferred_contact,
+        )
+
+        return NotificationPreferenceResponse(
+            user_id=actor_id,
+            preferred_contact=preferred_contact,
+        )
+
+    async def toggle_preference(self, actor_id: str) -> NotificationPreferenceResponse:
+        current     = await self._pref_repo.get_preferred_contact(actor_id)
+        new_channel: Literal["email", "in_app"] = "email" if current == "in_app" else "in_app"
+
+        await self._pref_repo.set_preferred_contact(actor_id, new_channel)
+        await self._session.commit()
+
+        logger.info(
+            "notification_preference_toggled",
+            actor_id=actor_id,
+            from_channel=current,
+            to_channel=new_channel,
+        )
+
+        return NotificationPreferenceResponse(
+            user_id=actor_id,
+            preferred_contact=new_channel,
+        )
+
+
+# ── Module-level email background helper (unchanged) ──────────────────────────
 
 async def _send_email_bg(email_addr: str, subject: str, body: str) -> None:
     try:

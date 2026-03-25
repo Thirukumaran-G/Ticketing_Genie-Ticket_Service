@@ -1,11 +1,3 @@
-"""
-IMAP email listener.
-src/handlers/email/imap_listener.py
-
-All five config values (user, password, host, port, mailbox) are passed
-in at call time — loaded from ticket.email_config table by the beat task.
-Nothing is read from settings inside this file anymore.
-"""
 from __future__ import annotations
 
 import base64
@@ -209,7 +201,7 @@ def _process_single_email(
     raw = msg_data[0][1]
     if not isinstance(raw, bytes):
         return
-
+    
     msg = email.message_from_bytes(raw)
 
     message_id:  str = (msg.get("Message-ID") or "").strip()

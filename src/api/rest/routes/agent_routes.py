@@ -67,40 +67,6 @@ async def get_agent_ticket(
     return TicketDetailResponse.model_validate(ticket)
 
 
-# ── SSE stream ────────────────────────────────────────────────────────────────
-
-@router.get(
-    "/agent/queue/stream",
-    summary="Agent — SSE stream for real-time queue updates",
-    response_class=StreamingResponse,
-)
-async def agent_queue_stream(
-    actor: CurrentActor = _AgentActor,
-) -> StreamingResponse:
-    async def _stream():
-        async with sse_manager.subscribe(actor.actor_id) as q:
-            while True:
-                try:
-                    payload = await asyncio.wait_for(q.get(), timeout=30)
-                    event   = payload["event"]
-                    data    = json.dumps(payload["data"])
-                    yield f"event: {event}\ndata: {data}\n\n"
-                except asyncio.TimeoutError:
-                    yield ": keepalive\n\n"
-                except asyncio.CancelledError:
-                    break
-
-    return StreamingResponse(
-        _stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control":     "no-cache",
-            "X-Accel-Buffering": "no",
-            "Connection":        "keep-alive",
-        },
-    )
-
-
 # ── Customer info ─────────────────────────────────────────────────────────────
 
 @router.get(

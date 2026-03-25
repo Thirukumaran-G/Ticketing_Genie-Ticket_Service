@@ -1,3 +1,4 @@
+# email_client.py
 from collections.abc import Generator
 from contextlib import contextmanager
 from email.mime.text import MIMEText

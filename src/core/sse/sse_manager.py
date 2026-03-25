@@ -9,7 +9,6 @@ from src.observability.logging.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Max events buffered per tab before we drop the oldest
 _QUEUE_MAX_SIZE = 100
 
 
@@ -24,16 +23,6 @@ class SSEManager:
 
     @asynccontextmanager
     async def subscribe(self, actor_id: str) -> AsyncIterator[asyncio.Queue]:
-        """
-        Async context manager — yields a dedicated Queue for this connection.
-        Registers on entry, deregisters on exit (even on crash/disconnect).
-
-        Usage in SSE route:
-            async with sse_manager.subscribe(actor_id) as q:
-                while True:
-                    payload = await asyncio.wait_for(q.get(), timeout=30)
-                    yield f"event: {payload['event']}\\ndata: ...\\n\\n"
-        """
         q: asyncio.Queue = asyncio.Queue(maxsize=_QUEUE_MAX_SIZE)
 
         async with self._lock:
@@ -67,16 +56,6 @@ class SSEManager:
     # ── Push event to all tabs for one user ───────────────────────────────────
 
     async def push(self, actor_id: str, payload: dict) -> int:
-        """
-        Push payload to ALL open queues for actor_id.
-
-        payload format expected by SSE routes:
-            { "event": "notification" | "queue_update" | "read_receipt",
-              "data":  { ... } }
-
-        Returns number of queues that received the event.
-        Dead / full queues are silently skipped and removed.
-        """
         async with self._lock:
             queues = list(self._subscribers.get(actor_id, []))
 
@@ -158,8 +137,6 @@ class SSEManager:
             data.update(extra)
 
         return await self.push(actor_id, {"event": "notification", "data": data})
-
-    # ── Diagnostics ───────────────────────────────────────────────────────────
 
     @property
     def connected_users(self) -> list[str]:

@@ -51,8 +51,10 @@ class EmailExtractionResult(BaseModel):
     )
     environment: str | None = Field(
         description=(
-            "Deployment environment: must be exactly one of: prod, stage, dev. "
-            "Map 'production' -> production, 'staging' -> staging"
+            "Deployment environment. "
+            # ── FIX Bug 4: corrected mapping so LLM returns exact DB values ──
+            "Return exactly one of: prod, stage, dev. "
+            "Map 'production' -> prod, 'staging' -> stage, 'development' -> dev. "
             "Return null if not mentioned."
         ),
         default=None,
@@ -73,7 +75,9 @@ Extraction rules:
 - product_name : must match one of the valid products above EXACTLY (same spelling); null if none match
 - severity     : infer from content — critical (outage/data loss), high (major feature broken),
                  medium (partial issue with workaround), low (minor/question); null if unclear
-- environment  : production / stage / dev only; null if not mentioned
+- environment  : return exactly one of: prod, stage, dev
+                 Map 'production' -> prod, 'staging' -> stage, 'development' -> dev
+                 Return null if environment is not mentioned anywhere in the email
 
 Return ONLY the structured fields. Do not add commentary."""
 
@@ -134,7 +138,6 @@ Return ONLY the structured fields. Do not add commentary."""
 
         except Exception as exc:
             logger.error("email_extraction_failed", error=str(exc))
-            # Graceful fallback — title from subject, rest empty
             return EmailExtractionResult(
                 title=subject.strip(),
                 description=body.strip(),

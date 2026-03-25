@@ -75,12 +75,12 @@ class TicketRepository:
         statuses: list[str] | None = None,
         limit: int = 50,
     ) -> list[Ticket]:
-        # Matches full status machine — no 'open', includes 'assigned' and 'reopened'
         statuses = statuses or [
             "assigned",
             "in_progress",
             "on_hold",
             "reopened",
+            "resolved"
         ]
         r = await self._s.execute(
             select(Ticket)

@@ -12,9 +12,12 @@ class NotificationPreferenceRepository:
     Fetches / sets notification preferences via the auth-service HTTP API.
     No direct cross-schema DB queries — auth schema stays fully owned by
     the auth service.
+
+    NOTE: Takes no constructor arguments. Do NOT pass a db session —
+    this repository is HTTP-only.
     """
 
-    def __init__(self) -> None:
+    def __init__(self) -> None:          # FIX: no session param — was crashing on NotificationPreferenceRepository(session)
         self._client = AuthHttpClient()
 
     async def get_preferred_contact(self, user_id: str) -> str:
@@ -24,19 +27,19 @@ class NotificationPreferenceRepository:
         has no preference set.
         """
         try:
-            data = await self._client.get_user(user_id)    
+            data = await self._client.get_user(str(user_id))   # FIX: str() guard
             preference = data.get("preferred_contact")
             if not preference:
                 logger.info(
                     "preference_not_found_defaulting_in_app",
-                    user_id=user_id,
+                    user_id=str(user_id),
                 )
                 return "in_app"
             return preference
         except Exception as exc:
             logger.warning(
                 "get_preferred_contact_failed_defaulting_in_app",
-                user_id=user_id,
+                user_id=str(user_id),
                 error=str(exc),
             )
             return "in_app"
@@ -47,12 +50,12 @@ class NotificationPreferenceRepository:
         Falls back silently — notification will still fire via in_app.
         """
         try:
-            await self._client.set_user_preferred_contact(user_id, value)
-            logger.info("notification_preference_set", user_id=user_id, new=value)
+            await self._client.set_user_preferred_contact(str(user_id), value)
+            logger.info("notification_preference_set", user_id=str(user_id), new=value)
         except Exception as exc:
             logger.warning(
                 "set_preferred_contact_failed",
-                user_id=user_id,
+                user_id=str(user_id),
                 error=str(exc),
             )
         return value

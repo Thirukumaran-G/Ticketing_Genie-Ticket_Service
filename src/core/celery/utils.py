@@ -1,6 +1,5 @@
 """
 ticket-service: src/core/celery/utils.py
-Full replacement file.
 """
 
 from __future__ import annotations
@@ -11,22 +10,12 @@ from src.observability.logging.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Process-level cache: tier_name → tier_id UUID string.
-# Tiers are seeded once and never change at runtime, so this is safe.
 _tier_id_cache: dict[str, str] = {}
 
 
 # ── Tier resolution ───────────────────────────────────────────────────────────
 
 async def fetch_tier_id(tier_name: str) -> str | None:
-    """
-    Resolve tier_name → tier_id UUID string by calling auth-service.
-
-    Results are cached in-process. On first call per tier name an HTTP request
-    is made; subsequent calls return the cached value instantly.
-
-    Returns None on any error — callers must handle gracefully.
-    """
     if tier_name in _tier_id_cache:
         return _tier_id_cache[tier_name]
 
@@ -59,15 +48,6 @@ async def fetch_customer_tier(
     customer_id: str,
     product_id:  str | None = None,
 ) -> tuple[str, str | None]:
-    """
-    Resolve (tier_name, tier_id) for a customer from auth-service.
-
-    Passes optional product_id to narrow to the correct subscription when a
-    company holds subscriptions to multiple products.
-
-    Returns ('starter', None) as a safe fallback — callers should skip SLA
-    logic when tier_id is None rather than crashing.
-    """
     url = (
         f"{settings.AUTH_SERVICE_URL}"
         f"/api/v1/auth/internal/customers/{customer_id}/tier"
@@ -84,7 +64,6 @@ async def fetch_customer_tier(
             data      = resp.json()
             tier_name = data["tier_name"]
             tier_id   = data["tier_id"]
-            # Warm the name→id cache so fetch_tier_id() hits it for free
             _tier_id_cache[tier_name] = tier_id
             logger.info(
                 "fetch_customer_tier_ok",
@@ -113,12 +92,12 @@ async def fetch_customer_tier(
 
 async def fetch_user_email(user_id) -> str | None:
     """
-    Fetch email address for any user (agent, team lead, customer) from
-    auth-service using the existing internal endpoint.
+    Fetch email address for any user (agent, team lead, customer).
+    user_id accepts str or UUID — always coerced to str for the URL.
     """
     url = (
         f"{settings.AUTH_SERVICE_URL}"
-        f"/api/v1/auth/internal/users/{user_id}/email"
+        f"/api/v1/auth/internal/users/{str(user_id)}/email"
     )
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -143,11 +122,13 @@ async def fetch_customer_email(customer_id: str) -> str | None:
 async def fetch_agent_name(user_id) -> str | None:
     """
     Fetch full_name for an agent or team lead from auth-service.
-    Reuses the /email endpoint which returns {email, full_name}.
+    Uses /internal/users/{user_id} which returns the full user object
+    including full_name. The /email endpoint does NOT return full_name.
+    user_id accepts str or UUID — always coerced to str for the URL.
     """
     url = (
         f"{settings.AUTH_SERVICE_URL}"
-        f"/api/v1/auth/internal/users/{user_id}/email"
+        f"/api/v1/auth/internal/users/{str(user_id)}"   # FIX: was /email, now /users/{id}
     )
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -166,15 +147,13 @@ async def fetch_agent_name(user_id) -> str | None:
 
 async def fetch_product_info(product_id: str) -> tuple[str | None, str | None]:
     import uuid as _uuid
-    from sqlalchemy import select, text
+    from sqlalchemy import text
 
     try:
         from src.data.clients.postgres_client import CelerySessionFactory
         async with CelerySessionFactory() as session:
             result = await session.execute(
-                text(
-                    "SELECT name, description FROM auth.product WHERE id = :pid"
-                ),
+                text("SELECT name, description FROM auth.product WHERE id = :pid"),
                 {"pid": _uuid.UUID(product_id)},
             )
             row = result.fetchone()
@@ -190,4 +169,3 @@ async def fetch_product_info(product_id: str) -> tuple[str | None, str | None]:
         logger.error("fetch_product_info_error", product_id=product_id, error=str(exc))
 
     return None, None
-

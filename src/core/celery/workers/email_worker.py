@@ -1,6 +1,5 @@
+# email_worker.py
 from __future__ import annotations
-
-import asyncio
 
 from src.core.celery.app import celery_app
 from src.core.celery.loop import run_async
@@ -14,60 +13,14 @@ def _is_valid_email(addr: str | None) -> bool:
     return bool(addr and addr != "None" and "@" in addr)
 
 
-# ── Acknowledgement Email ─────────────────────────────────────────────────────
-# Transactional receipt — always email, no preference check.
-# Called only for the very first ticket creation acknowledgement
-# sent directly from email_inbound_worker flow.
-
-@celery_app.task(
-    name="ticket.email.send_ack",
-    bind=True,
-    max_retries=3,
-)
-def send_acknowledgement_email(
-    self,
-    customer_email: str,
-    ticket_number:  str,
-    ticket_id:      str,
-) -> None:
-    """
-    Send auto-acknowledgement to customer immediately after ticket creation.
-    Transactional receipt — always delivered via email regardless of preference.
-    """
-
-    async def _send() -> None:
-        if not _is_valid_email(customer_email):
-            logger.error(
-                "ack_email_invalid_address",
-                ticket_number=ticket_number,
-                customer_email=customer_email,
-            )
-            return
-
-        from src.handlers.http_clients.email_client import EmailClient
-        await EmailClient().send_acknowledgement(customer_email, ticket_number, ticket_id)
-
-    try:
-        run_async(_send())
-        logger.info(
-            "ack_email_sent",
-            ticket_number=ticket_number,
-            customer_email=customer_email,
-        )
-    except Exception as exc:
-        logger.error(
-            "ack_email_failed",
-            ticket_number=ticket_number,
-            error=str(exc),
-        )
-        if _is_valid_email(customer_email):
-            raise self.retry(exc=exc, countdown=30 * (self.request.retries + 1))
-
-
 # ── Generic Notification Email ────────────────────────────────────────────────
 # Single email delivery layer for the entire system.
-# Called exclusively by notification_worker when recipient preference is email.
-# Never called directly from sla_worker or ai_worker.
+# Called exclusively by notification_worker when recipient preference is email,
+# and directly by ai_worker for transactional ticket receipts.
+#
+# NOTE: send_acknowledgement_email (ticket.email.send_ack) has been removed.
+# ai_worker.run_ai_classification owns all transactional ticket receipts
+# via send_notification_email.delay() directly.
 
 @celery_app.task(
     name="ticket.email.send_notification",
@@ -85,9 +38,9 @@ def send_notification_email(
     """
     Deliver a notification email to any recipient.
 
-    recipient_email should always be passed directly by notification_worker
-    after resolving it from auth-service. The fallback resolution here
-    exists only as a safety net for legacy callers.
+    recipient_email should always be passed directly by the caller
+    after resolving from auth-service. The fallback resolution here
+    exists only as a safety net.
 
     recipient_type values:
       "agent"      — internal support agent
@@ -113,7 +66,7 @@ def send_notification_email(
                 provided=recipient_email,
                 resolved=email_addr,
             )
-            return  # Address problem — do not retry
+            return
 
         from src.handlers.http_clients.email_client import EmailClient
         await EmailClient().send_generic(email_addr, subject, body)

@@ -35,10 +35,7 @@ def _sanitise_filename(name: str) -> str:
     return name[:200]
 
 
-# ── Service ────────────────────────────────────────────────────────────────────
-
 class ConversationService:
-
     def __init__(self, session: AsyncSession) -> None:
         self._session   = session
         self._conv_repo = ConversationRepository(session)
@@ -125,15 +122,6 @@ class ConversationService:
         file_bytes:  bytes,
         mime_type:   Optional[str] = None,
     ) -> Attachment:
-        """
-        Validate → upload to GCS → persist metadata in DB.
-
-        Allowed types : JPEG, PNG, WEBP, PDF
-        Max size      : 10 MB
-
-        DB stores the PUBLIC URL (file_path column).
-        Signed URLs are generated on-demand at download time — never stored.
-        """
         normalised_mime = (mime_type or "").lower().strip()
 
         if normalised_mime not in ALLOWED_MIME_TYPES:
@@ -155,13 +143,13 @@ class ConversationService:
             file_bytes=file_bytes,
             filename=safe_name,
             folder=f"tickets/{ticket_id}",
-            mime_type=normalised_mime,   # sets correct content_type on GCS blob
+            mime_type=normalised_mime,
         )
 
         attachment = Attachment(
             ticket_id=uuid.UUID(ticket_id),
             file_name=safe_name,
-            file_path=public_url,        # ← public URL stored in DB
+            file_path=public_url,
             file_size=len(file_bytes),
             mime_type=normalised_mime,
             uploaded_by=uuid.UUID(uploader_id),
@@ -179,14 +167,9 @@ class ConversationService:
         )
         return attachment
 
-    # ── Attachment download — converts public URL → signed URL ────────────────
+    # ── Attachment download ────────────────────────────────────────────────────
 
     def get_download_url(self, public_url: str, expiration_minutes: int = 30) -> str:
-        """
-        Takes the public URL stored in DB and returns a time-limited signed URL.
-        Signed URLs are NEVER stored — generated fresh on every download request.
-        Valid for expiration_minutes (default 30).
-        """
         from src.core.services.gcs_service import get_signed_url
         return get_signed_url(public_url, expiration_minutes=expiration_minutes)
 

@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.exceptions.base import NotFoundException
 from src.core.services.audit_service import audit_service
+from src.core.services.embed_service import EmbedService
 from src.data.models.postgres.models import Team, TeamMember
 from src.data.repositories.admin_repository import TeamMemberRepository, TeamRepository
 from src.observability.logging.logger import get_logger
@@ -18,6 +19,8 @@ from src.schemas.admin_schema import (
 )
 
 logger = get_logger(__name__)
+
+_embed_service = EmbedService()
 
 
 class TeamService:
@@ -87,12 +90,18 @@ class TeamService:
         if payload.skill_text:
             skills_dict = {"skill_text": payload.skill_text}
             try:
-                from src.core.services.embed_service import embed_text
-                embedding = await embed_text(payload.skill_text)
+                embedding = await _embed_service.embed(payload.skill_text)
+                logger.info(
+                    "skill_embedding_computed",
+                    team_id=team_id,
+                    user_id=str(payload.user_id),
+                    dims=len(embedding),
+                )
             except Exception as exc:
                 logger.warning(
                     "skill_embedding_failed",
                     team_id=team_id,
+                    user_id=str(payload.user_id),
                     error=str(exc),
                 )
 
@@ -113,7 +122,12 @@ class TeamService:
             action="team_member_added",
             actor_id=uuid.UUID(actor_id),
             actor_type="user",
-            new_value={"team_id": team_id, "user_id": str(payload.user_id)},
+            new_value={
+                "team_id":          team_id,
+                "user_id":          str(payload.user_id),
+                "has_embedding":    embedding is not None,
+                "skill_text":       payload.skill_text or "",
+            },
         )
         await self._session.commit()
         logger.info(
@@ -121,6 +135,7 @@ class TeamService:
             member_id=str(member.id),
             team_id=team_id,
             actor_id=actor_id,
+            has_embedding=embedding is not None,
         )
         return member
 
@@ -128,6 +143,6 @@ class TeamService:
         member = await self._member_repo.get_by_id(member_id)
         if not member:
             raise NotFoundException(f"Team member {member_id} not found.")
-        await self._member_repo.hard_delete(member_id) 
+        await self._member_repo.hard_delete(member_id)
         await self._session.commit()
         logger.info("team_member_hard_deleted", member_id=member_id, actor_id=actor_id)

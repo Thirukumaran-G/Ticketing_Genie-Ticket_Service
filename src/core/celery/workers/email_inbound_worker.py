@@ -1,6 +1,6 @@
-# email inbound worker
+# email inbound worker -> purely for email inbound not needed the preference aware here
 from __future__ import annotations
-
+G
 import base64
 import uuid as _uuid
 
@@ -24,7 +24,7 @@ def _get_portal_url() -> str:
     global _PORTAL_URL
     if _PORTAL_URL is None:
         from src.config.settings import settings
-        _PORTAL_URL = getattr(settings, "PORTAL_URL", "https://support.ticketinggenie.com")
+        _PORTAL_URL = getattr(settings, "PORTAL_URL", "https://gtk-ticket-genie-frontend-717740758627.us-east1.run.app")
     return _PORTAL_URL
 
 
@@ -189,7 +189,116 @@ def process_inbound_email(
                     subject=subject,
                 )
 
-            # ── Step 4: user create-or-get ────────────────────────────────────
+            # ── Step 4: thread reply — resolve user and handle immediately ────
+            # Thread replies don't need full validation — just append the message.
+            if parent_ticket:
+                # Resolve or create the user for thread replies too
+                full_name = (
+                    from_email.split("@")[0]
+                    .replace(".", " ")
+                    .replace("_", " ")
+                    .title()
+                )
+                customer = await auth_client.create_or_get_customer(
+                    email=from_email,
+                    full_name=full_name,
+                    company_id=company.company_id,
+                )
+                if not customer:
+                    logger.error(
+                        "inbound_email_user_resolution_failed",
+                        from_email=from_email,
+                    )
+                    await _record_email_processing(
+                        session, message_id, from_email, subject,
+                        in_reply_to, references,
+                        status="failed",
+                        failure_reason="user_resolution_failed",
+                    )
+                    await session.commit()
+                    return {"status": "failed", "reason": "user_resolution_failed"}
+
+                result = await _handle_thread_reply(
+                    session=session,
+                    ticket=parent_ticket,
+                    customer=customer,
+                    body=body,
+                    message_id=message_id,
+                    from_email=from_email,
+                    subject=subject,
+                    in_reply_to=in_reply_to,
+                    references=references,
+                    attachments=attachments or [],
+                )
+                await session.commit()
+                return result
+
+            # ── Step 5: LLM extraction (new ticket path only) ─────────────────
+            from src.control.agents.email_extraction_agent import (
+                EmailExtractionAgent,
+                EmailExtractionResult,
+            )
+            agent     = EmailExtractionAgent()
+            extracted: EmailExtractionResult = await agent.extract(
+                subject=subject,
+                body=body,
+                valid_products=valid_product_names,
+            )
+
+            # ── Step 6: product resolution ────────────────────────────────────
+            product_id_str       = None
+            matched_product_name = None
+            if extracted.product_name:
+                match = product_map.get(extracted.product_name.lower().strip())
+                if match:
+                    product_id_str, matched_product_name = match
+
+            # ── Step 7: completeness check ────────────────────────────────────
+            # FIX Bug 2: environment is now mandatory — checked here
+            missing = _find_missing_fields(extracted, product_id_str)
+            if missing:
+                await _send_incomplete_info_reply(
+                    to_email=from_email,
+                    subject=subject,
+                    missing_fields=missing,
+                    valid_products=valid_product_names,
+                )
+                await _record_email_processing(
+                    session, message_id, from_email, subject,
+                    in_reply_to, references,
+                    status="discarded",
+                    failure_reason=f"incomplete_fields:{','.join(missing)}",
+                )
+                await session.commit()
+                return {
+                    "status":  "discarded",
+                    "reason":  "incomplete_fields",
+                    "missing": missing,
+                }
+
+            # ── Step 8: subscription check ────────────────────────────────────
+            # Subscription verified BEFORE user is created to avoid ghost users
+            has_sub = await _verify_subscription(
+                session,
+                company_id=company.company_id,
+                product_id=product_id_str,
+            )
+            if not has_sub:
+                await _send_no_subscription_reply(
+                    to_email=from_email,
+                    subject=subject,
+                    product_name=matched_product_name,
+                )
+                await _record_email_processing(
+                    session, message_id, from_email, subject,
+                    in_reply_to, references,
+                    status="discarded",
+                    failure_reason="no_active_subscription",
+                )
+                await session.commit()
+                return {"status": "discarded", "reason": "no_active_subscription"}
+
+            # ── Step 9: user create-or-get (AFTER subscription confirmed) ─────
             full_name = (
                 from_email.split("@")[0]
                 .replace(".", " ")
@@ -215,86 +324,6 @@ def process_inbound_email(
                 await session.commit()
                 return {"status": "failed", "reason": "user_resolution_failed"}
 
-            # ── Step 5: thread reply ──────────────────────────────────────────
-            if parent_ticket:
-                result = await _handle_thread_reply(
-                    session=session,
-                    ticket=parent_ticket,
-                    customer=customer,
-                    body=body,
-                    message_id=message_id,
-                    from_email=from_email,
-                    subject=subject,
-                    in_reply_to=in_reply_to,
-                    references=references,
-                    attachments=attachments or [],
-                )
-                await session.commit()
-                return result
-
-            # ── Step 6: LLM extraction ────────────────────────────────────────
-            from src.control.agents.email_extraction_agent import (
-                EmailExtractionAgent,
-                EmailExtractionResult,
-            )
-            agent     = EmailExtractionAgent()
-            extracted: EmailExtractionResult = await agent.extract(
-                subject=subject,
-                body=body,
-                valid_products=valid_product_names,
-            )
-
-            # ── Step 7: product resolution ────────────────────────────────────
-            product_id_str       = None
-            matched_product_name = None
-            if extracted.product_name:
-                match = product_map.get(extracted.product_name.lower().strip())
-                if match:
-                    product_id_str, matched_product_name = match
-
-            # ── Step 8: completeness check ────────────────────────────────────
-            missing = _find_missing_fields(extracted, product_id_str)
-            if missing:
-                await _send_incomplete_info_reply(
-                    to_email=from_email,
-                    subject=subject,
-                    missing_fields=missing,
-                    valid_products=valid_product_names,
-                )
-                await _record_email_processing(
-                    session, message_id, from_email, subject,
-                    in_reply_to, references,
-                    status="discarded",
-                    failure_reason=f"incomplete_fields:{','.join(missing)}",
-                )
-                await session.commit()
-                return {
-                    "status":  "discarded",
-                    "reason":  "incomplete_fields",
-                    "missing": missing,
-                }
-
-            # ── Step 9: subscription check ────────────────────────────────────
-            has_sub = await _verify_subscription(
-                session,
-                company_id=company.company_id,
-                product_id=product_id_str,
-            )
-            if not has_sub:
-                await _send_no_subscription_reply(
-                    to_email=from_email,
-                    subject=subject,
-                    product_name=matched_product_name,
-                )
-                await _record_email_processing(
-                    session, message_id, from_email, subject,
-                    in_reply_to, references,
-                    status="discarded",
-                    failure_reason="no_active_subscription",
-                )
-                await session.commit()
-                return {"status": "discarded", "reason": "no_active_subscription"}
-
             # ── Step 10: create ticket ────────────────────────────────────────
             ticket = await _create_ticket_from_email(
                 session=session,
@@ -311,7 +340,6 @@ def process_inbound_email(
             )
             await session.commit()
 
-            # ── Step 11: reply email ──────────────────────────────────────────
             if customer.is_new:
                 await _send_welcome_new_user(
                     to_email=from_email,
@@ -680,7 +708,7 @@ async def _save_attachments(
     import base64
     from src.data.models.postgres.models import Attachment
     from src.core.services.gcs_service import upload_attachment as gcs_upload
- 
+
     for att in attachments:
         mime = (att.get("mime_type") or "").lower()
         if mime not in _SUPPORTED_ATTACHMENT_MIME:
@@ -690,10 +718,10 @@ async def _save_attachments(
                 filename=att.get("filename"),
             )
             continue
- 
+
         filename = (att.get("filename") or "attachment")[:255]
         data_b64 = att.get("data_b64") or ""
- 
+
         if not data_b64:
             logger.warning(
                 "inbound_email_attachment_empty_data",
@@ -701,7 +729,7 @@ async def _save_attachments(
                 ticket_id=ticket_id,
             )
             continue
- 
+
         try:
             file_bytes = base64.b64decode(data_b64)
         except Exception as exc:
@@ -711,14 +739,13 @@ async def _save_attachments(
                 error=str(exc),
             )
             continue
- 
-        # ── Upload to GCS — returns public URL ────────────────────────────────
+
         try:
             public_url = gcs_upload(
                 file_bytes=file_bytes,
                 filename=filename,
                 folder=f"tickets/{ticket_id}",
-                mime_type=mime,             # sets correct content_type on blob
+                mime_type=mime,
             )
         except Exception as exc:
             logger.error(
@@ -727,14 +754,13 @@ async def _save_attachments(
                 ticket_id=ticket_id,
                 error=str(exc),
             )
-            continue  # skip this attachment, don't fail the whole ticket
- 
-        # ── Persist metadata — file_path = public URL ─────────────────────────
+            continue
+
         attachment = Attachment(
             id=uuid6.uuid7(),
             ticket_id=_uuid.UUID(ticket_id),
             file_name=filename,
-            file_path=public_url,           # ← public URL stored in DB
+            file_path=public_url,
             file_size=len(file_bytes),
             mime_type=mime[:100],
         )
@@ -746,8 +772,9 @@ async def _save_attachments(
             public_url=public_url,
             file_size=len(file_bytes),
         )
- 
+
     await session.flush()
+
 
 # ── Email processing record ───────────────────────────────────────────────────
 
@@ -811,8 +838,10 @@ def _find_missing_fields(extracted, product_id_str: str | None) -> list[str]:
         missing.append("product_name")
     if not extracted.severity:
         missing.append("severity")
+    # FIX Bug 2: environment is now mandatory
+    if not extracted.environment:
+        missing.append("environment")
     return missing
-
 
 
 async def _send_reply_email(to_email: str, subject: str, body: str) -> None:
@@ -834,11 +863,13 @@ async def _send_incomplete_info_reply(
     missing_fields: list[str],
     valid_products: list[str],
 ) -> None:
+    # FIX Bug 3: environment moved to required section, template fully corrected
     field_labels = {
-        "title":        "Issue Title (make your email subject descriptive)",
-        "description":  "Issue Description (explain the problem in the email body)",
-        "product_name": "Product Name (must match one of the registered products below)",
-        "severity":     "Severity (include one of: critical / high / medium / low)",
+        "title":        "Issue Title — write a clear, concise summary as your email subject",
+        "description":  "Issue Description — explain the full problem in the email body",
+        "product_name": "Product Name — must exactly match one of the registered products listed below",
+        "severity":     "Severity — must be exactly one of: critical / high / medium / low",
+        "environment":  "Environment — must be exactly one of: prod / stage / dev",
     }
     missing_lines = "\n".join(f"  • {field_labels.get(f, f)}" for f in missing_fields)
     product_lines = "\n".join(f"  • {p}" for p in sorted(valid_products))
@@ -851,16 +882,16 @@ async def _send_incomplete_info_reply(
         f"{missing_lines}\n\n"
         f"Our registered products are:\n\n"
         f"{product_lines}\n\n"
-        f"Minimum required information to create a ticket:\n"
-        f"  • Issue Title        — a concise summary in your email subject\n"
-        f"  • Issue Description  — full details of the problem in the email body\n"
-        f"  • Product Name       — one of the products listed above\n"
-        f"  • Severity           — one of: critical / high / medium / low\n\n"
+        f"All of the following fields are required to create a ticket:\n\n"
+        f"  • Issue Title       — a concise summary in your email subject line\n"
+        f"  • Issue Description — full details of the problem in the email body\n"
+        f"  • Product Name      — must exactly match one of the products listed above\n"
+        f"  • Severity          — one of: critical / high / medium / low\n"
+        f"  • Environment       — one of: prod / stage / dev\n\n"
         f"Optional:\n"
-        f"  • Environment        — production / staging / dev\n"
-        f"  • Attachments        — JPEG, PNG, or PDF files\n\n"
-        f"Please reply with all required information and we will "
-        f"create your ticket immediately.\n\n"
+        f"  • Attachments       — JPEG, PNG, or PDF files only\n\n"
+        f"Please send a fresh email with ALL of the required fields filled in "
+        f"and we will create your ticket immediately.\n\n"
         f"— Ticketing Genie Support Team"
     )
     await _send_reply_email(
