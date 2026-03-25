@@ -1,6 +1,5 @@
 # email inbound worker -> purely for email inbound not needed the preference aware here
 from __future__ import annotations
-G
 import base64
 import uuid as _uuid
 
