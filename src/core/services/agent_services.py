@@ -30,7 +30,7 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
     "assigned":     {"in_progress", "on_hold"},
     "in_progress":  {"on_hold", "resolved"},
     "on_hold":      {"in_progress", "resolved"},
-    "resolved":     {"closed", "reopened"},
+    "resolved":     {"closed", "reopened", "in_progress"},
     "closed":       {"reopened"},
     "reopened":     {"in_progress", "on_hold"},
 }
