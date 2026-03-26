@@ -28,6 +28,8 @@ from src.schemas.team_lead_schema import (
 
 logger = get_logger(__name__)
 
+CUSTOMER_SUPPORT_TEAM_NAME = "Customer Support Team"
+
 TL_ALLOWED_STATUSES = {"in_progress", "on_hold", "resolved", "closed"}
 
 TL_VALID_TRANSITIONS: dict[str, set[str]] = {
@@ -162,6 +164,147 @@ class TeamLeadService:
             lead_user_id=lead_user_id,
         )
         return ticket
+
+    # ── Reroute ticket (Customer Support TL only) ─────────────────────────────
+
+    async def reroute_ticket(
+        self,
+        ticket_id:      str,
+        target_team_id: str,
+        lead_user_id:   str,
+    ) -> Ticket:
+        """
+        Reroute a ticket to another team.
+        Only the team lead of the Customer Support Team is allowed to do this.
+        Clears assigned_to, updates team_id, resets status to acknowledged,
+        and notifies the target team's lead.
+        """
+        from sqlalchemy import select
+        from src.data.models.postgres.models import Team
+
+        # ── Verify caller is TL of Customer Support Team ──────────────────
+        caller_team = await self._repo.get_team_by_lead(lead_user_id)
+        if not caller_team or caller_team.name != CUSTOMER_SUPPORT_TEAM_NAME:
+            raise PermissionError(
+                "Only the team lead of the Customer Support Team can re-route tickets."
+            )
+
+        # ── Verify the ticket belongs to the caller's team ─────────────────
+        team_ids = await self._get_all_team_ids(lead_user_id)
+        ticket   = await self._repo.get_ticket_by_any_team(ticket_id, team_ids)
+        if not ticket:
+            raise NotFoundException(f"Ticket {ticket_id} not found in your team.")
+
+        # ── Fetch target team ──────────────────────────────────────────────
+        result      = await self._session.execute(
+            select(Team).where(
+                Team.id == uuid.UUID(target_team_id),
+                Team.is_active.is_(True),
+            )
+        )
+        target_team = result.scalar_one_or_none()
+        if not target_team:
+            raise ValueError(f"Target team {target_team_id} not found or inactive.")
+
+        if str(target_team.id) == str(caller_team.id):
+            raise ValueError("Cannot re-route a ticket to the same team.")
+
+        old_team_id = ticket.team_id
+
+        # ── Update ticket ──────────────────────────────────────────────────
+        await self._ticket_repo.update_fields(ticket_id, {
+            "team_id":     target_team.id,
+            "assigned_to": None,
+            "status":      "acknowledged",
+        })
+
+        await audit_service.log(
+            entity_type="ticket",
+            entity_id=ticket.id,
+            action="ticket_rerouted_by_cs_tl",
+            actor_id=uuid.UUID(lead_user_id),
+            actor_type="team_lead",
+            old_value={
+                "team_id":     str(old_team_id) if old_team_id else None,
+                "assigned_to": str(ticket.assigned_to) if ticket.assigned_to else None,
+            },
+            new_value={
+                "team_id":     str(target_team.id),
+                "assigned_to": None,
+                "status":      "acknowledged",
+            },
+            changed_fields=["team_id", "assigned_to", "status"],
+            reason=f"Re-routed by Customer Support Team lead to {target_team.name}",
+            ticket_id=ticket.id,
+        )
+
+        await self._session.commit()
+        ticket = await self._ticket_repo.get_by_id(ticket_id)
+
+        # ── Notify target team's lead ──────────────────────────────────────
+        if target_team.team_lead_id:
+            await self._notif_svc.notify(
+                recipient_id=str(target_team.team_lead_id),
+                ticket=ticket,
+                notif_type="ticket_rerouted",
+                title=(
+                    f"Ticket {ticket.ticket_number} has been routed to your team"
+                ),
+                message=(
+                    f"The Customer Support Team lead has routed ticket "
+                    f"{ticket.ticket_number} to your team ({target_team.name}).\n\n"
+                    f"Ticket Number : {ticket.ticket_number}\n"
+                    f"Title         : {ticket.title or 'N/A'}\n"
+                    f"Priority      : {ticket.priority or 'N/A'}\n"
+                    f"Severity      : {ticket.severity or 'N/A'}\n\n"
+                    f"Please assign this ticket to an agent in your team."
+                ),
+                is_internal=True,
+                email_subject=(
+                    f"[{ticket.ticket_number}] Ticket routed to your team — {target_team.name}"
+                ),
+                email_body=(
+                    f"Hi,\n\n"
+                    f"The Customer Support Team lead has routed a ticket to your team.\n\n"
+                    f"Ticket Number : {ticket.ticket_number}\n"
+                    f"Title         : {ticket.title or 'N/A'}\n"
+                    f"Priority      : {ticket.priority or 'N/A'}\n"
+                    f"Severity      : {ticket.severity or 'N/A'}\n\n"
+                    f"Please log in to the portal and assign this ticket to a member of "
+                    f"your team at your earliest convenience.\n\n"
+                    f"— Ticketing Genie"
+                ),
+            )
+        else:
+            logger.warning(
+                "reroute_target_team_no_lead",
+                ticket_id=ticket_id,
+                target_team_id=target_team_id,
+            )
+
+        logger.info(
+            "ticket_rerouted",
+            ticket_id=ticket_id,
+            from_team=str(old_team_id),
+            to_team=str(target_team.id),
+            lead_user_id=lead_user_id,
+        )
+        return ticket
+
+    # ── Get all active teams (for reroute dropdown) ───────────────────────────
+
+    # Service
+    async def get_all_teams(self, product_id: str | None = None) -> list[dict]:
+        from sqlalchemy import select
+        from src.data.models.postgres.models import Team
+
+        query = select(Team).where(Team.is_active.is_(True))
+
+        if product_id:
+            query = query.where(Team.product_id == uuid.UUID(product_id))
+
+        result = await self._session.execute(query.order_by(Team.name))
+        return [{"id": str(t.id), "name": t.name} for t in result.scalars().all()]
 
     # ── Status update ─────────────────────────────────────────────────────────
 

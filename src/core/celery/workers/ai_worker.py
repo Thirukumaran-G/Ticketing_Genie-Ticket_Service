@@ -21,6 +21,8 @@ _embedding_model = None
 # ── IST timezone helper ───────────────────────────────────────────────────────
 _IST = timezone(timedelta(hours=5, minutes=30))
 
+CUSTOMER_SUPPORT_TEAM_NAME = "Customer Support Team"
+
 def _fmt_dt(dt) -> str:
     """Format a UTC datetime as IST (UTC+5:30) for display in notifications."""
     if dt is None:
@@ -347,11 +349,97 @@ async def _do_assign(
             logger.warning("auto_assign_no_teams_for_product", product_id=str(ticket.product_id))
             return {"error": "No teams for product"}
 
-        selected_team = await _llm_pick_team(ticket=ticket, teams=teams)
-        if not selected_team:
-            selected_team = teams[0]
-            logger.warning("auto_assign_team_fallback", ticket_id=ticket_id, team=selected_team.name)
+        # ── LLM team selection with fallback ──────────────────────────────
+        selected_team, llm_failed = await _llm_pick_team(ticket=ticket, teams=teams)
 
+        if llm_failed:
+            # ── Route to Customer Support Team, notify their TL, stop here ──
+            logger.warning(
+                "auto_assign_llm_failed_routing_to_customer_support",
+                ticket_id=ticket_id,
+            )
+
+            await ticket_repo.update_fields(ticket_id, {
+                "team_id":     selected_team.id,
+                "assigned_to": None,
+            })
+            await session.commit()
+
+            try:
+                await audit_service.log(
+                    entity_type="ticket",
+                    entity_id=ticket.id,
+                    action="ticket_routed_llm_fallback",
+                    actor_id=ticket.customer_id,
+                    actor_type="system",
+                    new_value={
+                        "team_id": str(selected_team.id),
+                        "reason":  "llm_unavailable",
+                    },
+                    ticket_id=ticket.id,
+                )
+            except Exception as exc:
+                logger.warning("audit_llm_fallback_failed", ticket_id=ticket_id, error=str(exc))
+
+            # Notify Customer Support Team lead
+            if selected_team.team_lead_id:
+                notify_recipient.apply_async(
+                    kwargs=dict(
+                        recipient_id=str(selected_team.team_lead_id),
+                        recipient_type="team_lead",
+                        ticket_id=str(ticket.id),
+                        ticket_number=ticket.ticket_number,
+                        notif_type="ticket_routed_llm_fallback",
+                        title=(
+                            f"Ticket {ticket.ticket_number} routed to your team "
+                            f"(AI routing unavailable)"
+                        ),
+                        message=(
+                            f"Due to AI routing unavailability, ticket {ticket.ticket_number} "
+                            f"has been automatically routed to your team (Customer Support Team).\n\n"
+                            f"Ticket Number : {ticket.ticket_number}\n"
+                            f"Title         : {ticket.title or 'N/A'}\n"
+                            f"Priority      : {ticket.priority or 'N/A'}\n"
+                            f"Severity      : {ticket.severity or 'N/A'}\n\n"
+                            f"If this ticket belongs to another team, you can re-route it "
+                            f"to the appropriate internal team from the ticket detail page."
+                        ),
+                        email_subject=(
+                            f"[{ticket.ticket_number}] Ticket routed to Customer Support Team "
+                            f"— AI routing unavailable"
+                        ),
+                        email_body=(
+                            f"Hi,\n\n"
+                            f"Due to AI routing unavailability, the following ticket has been "
+                            f"automatically routed to the Customer Support Team.\n\n"
+                            f"Ticket Number : {ticket.ticket_number}\n"
+                            f"Title         : {ticket.title or 'N/A'}\n"
+                            f"Priority      : {ticket.priority or 'N/A'}\n"
+                            f"Severity      : {ticket.severity or 'N/A'}\n\n"
+                            f"If this ticket belongs to another internal team, please open the "
+                            f"ticket in the portal and use the 'Route Ticket' option to forward "
+                            f"it to the appropriate team. The routed team's lead will be notified "
+                            f"automatically.\n\n"
+                            f"— Ticketing Genie"
+                        ),
+                        is_internal=True,
+                    ),
+                    countdown=2,
+                )
+            else:
+                logger.warning(
+                    "auto_assign_llm_fallback_no_tl",
+                    ticket_id=ticket_id,
+                    team_id=str(selected_team.id),
+                )
+
+            return {
+                "assigned_to": None,
+                "team_id":     str(selected_team.id),
+                "reason":      "llm_unavailable_routed_to_customer_support",
+            }
+
+        # ── Normal flow: LLM succeeded, proceed with member scoring ───────
         members_result = await session.execute(
             select(TeamMember).where(
                 TeamMember.team_id == selected_team.id,
@@ -766,28 +854,64 @@ def _abstract_priority_reason(original_severity: str, new_priority: str, reason:
 
 # ── Team routing ──────────────────────────────────────────────────────────────
 
-async def _llm_pick_team(ticket, teams: list) -> object | None:
+async def _llm_pick_team(ticket, teams: list) -> tuple[object, bool]:
+    """
+    Returns (selected_team, llm_failed).
+    llm_failed=True means LLM was unavailable; selected_team will be the
+    Customer Support Team (or teams[0] as last resort).
+    llm_failed=False means LLM succeeded and selected_team is the LLM's choice.
+    """
     from src.control.agents.routing_agent import TeamRoutingAgent
 
-    team_names = [t.name for t in teams]
-    agent  = TeamRoutingAgent()
-    result = await agent.route(
-        title=ticket.title or "",
-        description=ticket.description or "",
-        team_names=team_names,
-    )
+    def _find_customer_support_team(teams: list):
+        for t in teams:
+            if t.name == CUSTOMER_SUPPORT_TEAM_NAME:
+                return t
+        # last resort: first team in list
+        return teams[0]
 
+    team_names = [t.name for t in teams]
+    agent = TeamRoutingAgent()
+
+    try:
+        result = await agent.route(
+            title=ticket.title or "",
+            description=ticket.description or "",
+            team_names=team_names,
+        )
+    except Exception as exc:
+        logger.error(
+            "llm_team_routing_exception_fallback",
+            ticket_id=str(ticket.id),
+            error=str(exc),
+        )
+        fallback = _find_customer_support_team(teams)
+        logger.warning(
+            "auto_assign_llm_fallback_team",
+            ticket_id=str(ticket.id),
+            team=fallback.name,
+        )
+        return fallback, True
+
+    # Check if the returned team name matched any real team
     for team in teams:
         if team.name == result.team_name:
             logger.info("auto_assign_team_selected", team=team.name, ticket_id=str(ticket.id))
-            return team
+            return team, False
     for team in teams:
         if team.name.lower() == result.team_name.lower():
             logger.info("auto_assign_team_selected_ci", team=team.name, ticket_id=str(ticket.id))
-            return team
+            return team, False
 
-    logger.warning("auto_assign_team_not_matched", returned=result.team_name, available=team_names)
-    return None
+    # LLM returned a team name that doesn't match — treat as LLM failure
+    logger.warning(
+        "auto_assign_team_not_matched_fallback",
+        returned=result.team_name,
+        available=team_names,
+        ticket_id=str(ticket.id),
+    )
+    fallback = _find_customer_support_team(teams)
+    return fallback, True
 
 
 # ── Embedding helpers ─────────────────────────────────────────────────────────

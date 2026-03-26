@@ -1,7 +1,6 @@
-from __future__ import annotations
-
+# src/api/rest/routers/team_lead_router.py
 import asyncio
-import json
+import os
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
@@ -17,6 +16,7 @@ from src.schemas.team_lead_schema import (
     ManualAssignRequest,
     NotificationTemplateResponse,
     NotificationTemplateUpdateRequest,
+    RerouteTicketRequest,
     SendApologyRequest,
     SendApologyResponse,
     TeamOverviewResponse,
@@ -94,6 +94,28 @@ async def manual_assign(
     return TLTicketDetailResponse.model_validate(ticket)
 
 
+# ── Route ticket to another team (Customer Support TL only) ──────────────────
+
+@router.post("/tickets/{ticket_id}/reroute", response_model=TLTicketDetailResponse)
+async def reroute_ticket(
+    ticket_id: str,
+    payload:   RerouteTicketRequest,
+    actor:     CurrentActor    = _TLActor,
+    service:   TeamLeadService = Depends(_tl_svc),
+) -> TLTicketDetailResponse:
+    try:
+        ticket = await service.reroute_ticket(
+            ticket_id=ticket_id,
+            target_team_id=str(payload.target_team_id),
+            lead_user_id=actor.actor_id,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return TLTicketDetailResponse.model_validate(ticket)
+
+
 # ── Status update ─────────────────────────────────────────────────────────────
 
 @router.patch("/tickets/{ticket_id}/status", response_model=TLTicketDetailResponse)
@@ -118,6 +140,17 @@ async def get_team_overview(
     service: TeamLeadService = Depends(_tl_svc),
 ) -> TeamOverviewResponse:
     return await service.get_team_overview(actor.actor_id)
+
+
+# ── All teams list (for reroute dropdown) ────────────────────────────────────
+
+@router.get("/teams")
+async def get_all_teams(
+    product_id: str | None = None,          # <-- add query param
+    actor:   CurrentActor    = _TLActor,
+    service: TeamLeadService = Depends(_tl_svc),
+) -> list[dict]:
+    return await service.get_all_teams(product_id=product_id)
 
 
 # ── Ticket thread ─────────────────────────────────────────────────────────────
@@ -371,5 +404,3 @@ async def send_apology(
         template_key=result["template_key"],
         message=result["message"],
     )
-
-

@@ -263,3 +263,6 @@ class BulkActionResponse(BaseModel):
     resolved:       Optional[int] = None
     skipped:        int
     ticket_numbers: list[str]
+
+class RerouteTicketRequest(BaseModel):
+    target_team_id: uuid.UUID
