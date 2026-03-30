@@ -253,7 +253,6 @@ def process_inbound_email(
                     product_id_str, matched_product_name = match
 
             # ── Step 7: completeness check ────────────────────────────────────
-            # FIX Bug 2: environment is now mandatory — checked here
             missing = _find_missing_fields(extracted, product_id_str)
             if missing:
                 await _send_incomplete_info_reply(
@@ -837,7 +836,6 @@ def _find_missing_fields(extracted, product_id_str: str | None) -> list[str]:
         missing.append("product_name")
     if not extracted.severity:
         missing.append("severity")
-    # FIX Bug 2: environment is now mandatory
     if not extracted.environment:
         missing.append("environment")
     return missing

@@ -1,7 +1,3 @@
-"""
-Agent service.
-src/core/services/agent_services.py
-"""
 from __future__ import annotations
 
 import asyncio

@@ -1,8 +1,3 @@
-"""
-ConversationRepository + AttachmentRepository
-src/data/repositories/conversation_repository.py
-"""
-
 from __future__ import annotations
 
 import uuid

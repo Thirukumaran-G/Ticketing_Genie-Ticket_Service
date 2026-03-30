@@ -18,12 +18,16 @@ from src.schemas.ticket_schema import (
     UnassignRequest,
     BreachJustificationRequest,
     BreachJustificationResponse,
+    EnhanceRequest,
+    EnhanceResponse
 )
 from fastapi.responses import Response
+from src.control.agents.enhance_agent import EnhanceAgent
 
 router = APIRouter(tags=["Agent — Queue"])
 
 _AgentActor = Depends(require_role(ROLE_AGENT))
+_enhancer   = EnhanceAgent()
 
 
 def _agent_svc(
@@ -214,3 +218,29 @@ async def list_breach_justifications_agent(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     return await service.get_breach_justifications(ticket_id)
+
+
+@router.post(
+    "/agent/tickets/{ticket_id}/enhance-reply",
+    response_model=EnhanceResponse,
+    summary="Agent — enhance a draft reply using AI",
+)
+async def enhance_reply(
+    ticket_id: str,
+    payload:   EnhanceRequest,
+    actor:     CurrentActor = _AgentActor,
+) -> EnhanceResponse:
+    """
+    Enhance the agent's draft reply text.
+    The ticket_id is validated implicitly via the auth dependency —
+    the agent must be authenticated. You can add ownership checks here
+    if needed.
+    """
+    if not payload.draft.strip():
+        raise HTTPException(status_code=422, detail="Draft text cannot be empty.")
+ 
+    result = await _enhancer.enhance(draft=payload.draft, mode=payload.mode)
+    return EnhanceResponse(
+        enhanced_text=result.enhanced_text,
+        changes_summary=result.changes_summary,
+    )

@@ -184,3 +184,12 @@ class BreachJustificationResponse(BaseModel):
     breach_type:     str
     justification:   str
     submitted_at:    datetime
+
+class EnhanceRequest(BaseModel):
+    draft: str = Field(..., min_length=1, description="The agent's draft text to enhance")
+    mode:  str = Field("reply", pattern="^(reply|internal)$", description="'reply' or 'internal'")
+ 
+ 
+class EnhanceResponse(BaseModel):
+    enhanced_text:   str
+    changes_summary: str

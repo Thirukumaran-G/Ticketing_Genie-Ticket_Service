@@ -63,15 +63,6 @@ def upload_attachment(
     folder:     str,
     mime_type:  str = "application/octet-stream",
 ) -> str:
-    """
-    Upload bytes to GCS under:
-      {GCS_BUCKET_PREFIX}/attachments/{folder}/{uuid}_{filename}
-
-    Returns the PUBLIC URL — stored in DB as file_path.
-    e.g. https://storage.googleapis.com/{bucket}/{blob_path}
-
-    folder example: "tickets/{ticket_id}"
-    """
     safe_name   = Path(filename).name.replace(" ", "_")[:100]
     unique_name = f"{uuid.uuid4().hex}_{safe_name}"
     blob_path   = f"{settings.GCS_BUCKET_PREFIX}/attachments/{folder}/{unique_name}"
@@ -87,16 +78,6 @@ def upload_attachment(
 
 
 def get_signed_url(public_url_or_blob_path: str, expiration_minutes: int = 30) -> str:
-    """
-    Generate a time-limited signed URL for viewing/downloading an attachment.
-
-    Accepts either:
-      - public URL   (https://storage.googleapis.com/{bucket}/{blob_path})
-      - raw blob path ({GCS_BUCKET_PREFIX}/attachments/...)
-
-    Requires the Cloud Run service account to have
-    roles/iam.serviceAccountTokenCreator on GCS_TARGET_SERVICE_ACCOUNT.
-    """
     import datetime
     from google.auth import impersonated_credentials
     import google.auth

@@ -146,7 +146,7 @@ async def get_team_overview(
 
 @router.get("/teams")
 async def get_all_teams(
-    product_id: str | None = None,          # <-- add query param
+    product_id: str | None = None,          
     actor:   CurrentActor    = _TLActor,
     service: TeamLeadService = Depends(_tl_svc),
 ) -> list[dict]:
