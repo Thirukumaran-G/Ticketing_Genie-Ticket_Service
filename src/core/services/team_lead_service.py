@@ -1,7 +1,3 @@
-"""
-TeamLeadService.
-src/core/services/team_lead_service.py
-"""
 from __future__ import annotations
 
 import uuid
@@ -164,6 +160,26 @@ class TeamLeadService:
             lead_user_id=lead_user_id,
         )
         return ticket
+    
+    async def update_agent_skill(
+        self,
+        agent_user_id: str,
+        skill_text:    str,
+        lead_user_id:  str,
+    ) -> dict:
+        team_ids = await self._get_all_team_ids(lead_user_id)
+        member   = await self._repo.update_member_skill(agent_user_id, team_ids, skill_text)
+        if not member:
+            raise NotFoundException(
+                f"Agent {agent_user_id} not found in your team."
+            )
+        await self._session.commit()
+        logger.info(
+            "agent_skill_updated",
+            agent_user_id=agent_user_id,
+            lead_user_id=lead_user_id,
+        )
+        return {"user_id": agent_user_id, "skills": member.skills}
 
     # ── Reroute ticket (Customer Support TL only) ─────────────────────────────
 

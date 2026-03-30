@@ -26,10 +26,6 @@ class EmailExtractionResult(BaseModel):
     severity: str | None = Field(default=None)
     environment: str | None = Field(default=None)
 
-
-# ── Internal LLM schema — NO product list exposed to the model ────────────────
-# The LLM only extracts the raw words the sender used.
-# Product resolution is done deterministically in Python after extraction.
 class _LLMExtraction(BaseModel):
     title: str = Field(
         description="The ticket title from the email subject. Clean and concise. Empty string if not determinable.",
@@ -134,7 +130,6 @@ Return ONLY the structured fields. No commentary."""
         logger.info("email_extraction_product_no_match", raw=raw)
         return None
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     async def extract(
         self,
         subject: str,
@@ -175,8 +170,8 @@ Return ONLY the structured fields. No commentary."""
             logger.info(
                 "email_extraction_ok",
                 title=result.title[:60] if result.title else "",
-                product_name_raw=llm_result.product_name_raw,  # what sender actually wrote
-                product_name=result.product_name,              # what Python resolved it to
+                product_name_raw=llm_result.product_name_raw,
+                product_name=result.product_name,       
                 severity=result.severity,
                 environment=result.environment,
             )
@@ -184,6 +179,7 @@ Return ONLY the structured fields. No commentary."""
 
         except Exception as exc:
             logger.error("email_extraction_failed", error=str(exc))
+
             return EmailExtractionResult(
                 title=subject.strip(),
                 description=body.strip(),

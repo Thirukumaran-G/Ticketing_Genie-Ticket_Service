@@ -266,3 +266,6 @@ class BulkActionResponse(BaseModel):
 
 class RerouteTicketRequest(BaseModel):
     target_team_id: uuid.UUID
+
+class UpdateAgentSkillRequest(BaseModel):
+    skill_text: str

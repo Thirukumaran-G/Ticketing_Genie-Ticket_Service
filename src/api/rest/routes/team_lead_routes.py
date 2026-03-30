@@ -15,6 +15,7 @@ from src.schemas.conversation_schema import AttachmentItem
 from src.schemas.team_lead_schema import (
     ManualAssignRequest,
     NotificationTemplateResponse,
+    UpdateAgentSkillRequest,
     NotificationTemplateUpdateRequest,
     RerouteTicketRequest,
     SendApologyRequest,
@@ -404,3 +405,19 @@ async def send_apology(
         template_key=result["template_key"],
         message=result["message"],
     )
+
+@router.patch("/members/{agent_user_id}/skill")
+async def update_agent_skill(
+    agent_user_id: str,
+    payload:       UpdateAgentSkillRequest,
+    actor:         CurrentActor    = _TLActor,
+    service:       TeamLeadService = Depends(_tl_svc),
+) -> dict:
+    try:
+        return await service.update_agent_skill(
+            agent_user_id=agent_user_id,
+            skill_text=payload.skill_text,
+            lead_user_id=actor.actor_id,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc))

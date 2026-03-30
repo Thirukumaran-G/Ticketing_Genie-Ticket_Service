@@ -1,8 +1,3 @@
-"""
-TeamLeadRepository — queries scoped to a team lead's team.
-src/data/repositories/team_lead_repository.py
-"""
-
 from __future__ import annotations
 
 import uuid
@@ -12,6 +7,13 @@ from sqlalchemy import select, update, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.data.models.postgres.models import Team, TeamMember, Ticket
+
+
+# Active (non-terminal) ticket statuses
+_ACTIVE_STATUSES = ["new", "acknowledged", "assigned", "in_progress", "on_hold", "reopened"]
+
+# Statuses that mean the ticket has not yet been assigned to an agent
+_UNASSIGNED_STATUSES = ["new", "acknowledged"]
 
 
 class TeamLeadRepository:
@@ -71,7 +73,7 @@ class TeamLeadRepository:
             .where(
                 Ticket.team_id == uuid.UUID(team_id),
                 Ticket.assigned_to.is_(None),
-                Ticket.status.in_(["new", "open"]),
+                Ticket.status.in_(_UNASSIGNED_STATUSES),  # fixed: was ["new", "open"]
             )
             .order_by(Ticket.priority.asc(), Ticket.created_at.asc())
             .limit(limit)
@@ -92,7 +94,7 @@ class TeamLeadRepository:
             .where(
                 Ticket.team_id.in_(uuids),
                 Ticket.assigned_to.is_(None),
-                Ticket.status.in_(["new", "open"]),
+                Ticket.status.in_(_UNASSIGNED_STATUSES),  # fixed: was ["new", "open"]
             )
             .order_by(Ticket.priority.asc(), Ticket.created_at.asc())
             .limit(limit)
@@ -206,7 +208,7 @@ class TeamLeadRepository:
             select(Ticket.assigned_to, func.count().label("cnt"))
             .where(
                 Ticket.assigned_to.in_(user_ids),
-                Ticket.status.in_(["new", "open", "in_progress"]),
+                Ticket.status.in_(_ACTIVE_STATUSES),  # fixed: was ["new", "open", "in_progress"]
             )
             .group_by(Ticket.assigned_to)
         )
@@ -216,6 +218,36 @@ class TeamLeadRepository:
             (member, count_map.get(str(member.user_id), 0))
             for member in members
         ]
+    
+    async def update_member_skill(
+        self,
+        agent_user_id: str,
+        team_ids:      list[str],
+        skill_text:    str,
+    ) -> Optional[TeamMember]:
+        """
+        Update skills JSONB for a TeamMember scoped to the TL's teams.
+        Returns the updated TeamMember or None if not found.
+        """
+        uuids = [uuid.UUID(tid) for tid in team_ids]
+        r = await self._s.execute(
+            select(TeamMember).where(
+                TeamMember.user_id  == uuid.UUID(agent_user_id),
+                TeamMember.team_id.in_(uuids),
+                TeamMember.is_active.is_(True),
+            )
+            .limit(1)
+        )
+        member = r.scalars().first()
+        if not member:
+            return None
+ 
+        # Merge into existing JSONB, preserving any other keys
+        existing = dict(member.skills) if member.skills else {}
+        existing["skill_text"] = skill_text
+        member.skills = existing
+        await self._s.flush()
+        return member
 
     # ── Agent workload — across all product teams ─────────────────────────────
 
@@ -252,7 +284,7 @@ class TeamLeadRepository:
             select(Ticket.assigned_to, func.count().label("cnt"))
             .where(
                 Ticket.assigned_to.in_(user_ids),
-                Ticket.status.in_(["new", "open", "in_progress"]),
+                Ticket.status.in_(_ACTIVE_STATUSES),  # fixed: was ["new", "open", "in_progress"]
             )
             .group_by(Ticket.assigned_to)
         )
@@ -270,7 +302,7 @@ class TeamLeadRepository:
             select(func.count()).select_from(Ticket).where(
                 Ticket.team_id    == uuid.UUID(team_id),
                 Ticket.assigned_to.is_(None),
-                Ticket.status.in_(["new", "open"]),
+                Ticket.status.in_(_UNASSIGNED_STATUSES),  # fixed: was ["new", "open"]
             )
         )
         return r.scalar() or 0
@@ -284,7 +316,7 @@ class TeamLeadRepository:
             select(func.count()).select_from(Ticket).where(
                 Ticket.team_id.in_(uuids),
                 Ticket.assigned_to.is_(None),
-                Ticket.status.in_(["new", "open"]),
+                Ticket.status.in_(_UNASSIGNED_STATUSES),  # fixed: was ["new", "open"]
             )
         )
         return r.scalar() or 0
