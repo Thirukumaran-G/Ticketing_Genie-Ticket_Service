@@ -149,10 +149,14 @@ class TicketService:
             ticket_number=ticket.ticket_number,
             status=ticket.status,
         )
+    
+    async def list_subscribed_products_by_ids(self, product_ids: list[str]) -> list[dict]:
+        from src.handlers.http_clients.auth_client import AuthHttpClient
+        return await AuthHttpClient().get_subscribed_products_by_ids(product_ids)
 
     # ── Customer self-service views ───────────────────────────────────────────
 
-    async def list_my_tickets(
+    async def list_my_tickets(      
         self,
         customer_id: str,
         status:      str | None = None,

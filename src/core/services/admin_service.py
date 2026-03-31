@@ -26,8 +26,8 @@ from src.schemas.admin_schema import (
     KeywordRuleCreateRequest,
     KeywordRuleUpdateRequest,
     ProductConfigUpsertRequest,
-    SeverityPriorityMapCreateRequest,
-    SLARuleCreateRequest,
+    SLARuleUpdateRequest,
+    SeverityPriorityMapUpdateRequest
 )
 
 logger = get_logger(__name__)
@@ -62,6 +62,23 @@ class AdminService:
             if c.is_secret:
                 c.value = "***"
         return configs
+
+    # admin_service.py — new method
+    async def report_resolved_by_day(self, days: int = 30) -> dict:
+        from sqlalchemy import cast, Date, func, select, text
+        rows = await self._session.execute(
+            select(
+                cast(Ticket.resolved_at, Date).label("day"),
+                func.count(Ticket.id).label("count"),
+            )
+            .where(
+                Ticket.resolved_at.isnot(None),
+                Ticket.resolved_at >= func.now() - text(f"interval '{days} days'")
+            )
+            .group_by(cast(Ticket.resolved_at, Date))
+            .order_by(cast(Ticket.resolved_at, Date))
+        )
+        return {"resolved_by_day": [{"day": str(r.day), "count": r.count} for r in rows]}
 
     async def upsert_email_config(
         self,
@@ -129,133 +146,10 @@ class AdminService:
     async def list_sla_rules(self) -> list[SLARule]:
         return await self._sla_repo.list_active()
 
-    async def upsert_sla_rule(
-        self, payload: SLARuleCreateRequest, admin_id: str
-    ) -> SLARule:
-        existing = await self._sla_repo.get_by_tier_and_priority(
-            str(payload.tier_id), payload.priority
-        )
-        if existing:
-            old_value = {
-                "response_time_min":   existing.response_time_min,
-                "resolution_time_min": existing.resolution_time_min,
-            }
-            existing.response_time_min   = payload.response_time_min
-            existing.resolution_time_min = payload.resolution_time_min
-            existing.is_active           = True
-            await self._session.flush()
-            await self._session.refresh(existing)
-            await audit_service.log(
-                entity_type="sla_rule",
-                entity_id=existing.id,
-                action="sla_rule_updated",
-                actor_id=uuid.UUID(admin_id),
-                actor_type="user",
-                old_value=old_value,
-                new_value={
-                    "response_time_min":   payload.response_time_min,
-                    "resolution_time_min": payload.resolution_time_min,
-                },
-                changed_fields=["response_time_min", "resolution_time_min"],
-            )
-            await self._session.commit()
-            logger.info("sla_rule_updated", rule_id=str(existing.id))
-            return existing
-
-        rule = SLARule(
-            tier_id=payload.tier_id,
-            priority=payload.priority,
-            response_time_min=payload.response_time_min,
-            resolution_time_min=payload.resolution_time_min,
-            created_by=uuid.UUID(admin_id),
-        )
-        self._session.add(rule)
-        await self._session.flush()
-        await self._session.refresh(rule)
-        await audit_service.log(
-            entity_type="sla_rule",
-            entity_id=rule.id,
-            action="sla_rule_created",
-            actor_id=uuid.UUID(admin_id),
-            actor_type="user",
-            new_value={
-                "tier_id":             str(payload.tier_id),
-                "priority":            payload.priority,
-                "response_time_min":   payload.response_time_min,
-                "resolution_time_min": payload.resolution_time_min,
-            },
-        )
-        await self._session.commit()
-        logger.info("sla_rule_created", rule_id=str(rule.id))
-        return rule
-
-    async def hard_delete_sla_rule(self, rule_id: str, admin_id: str) -> None:
-        rule = await self._sla_repo.get_by_id(rule_id)
-        if not rule:
-            raise NotFoundException(f"SLA rule {rule_id} not found.")
-        await self._sla_repo.hard_delete_sla_rule(rule_id)
-        await self._session.commit()
-        logger.info("sla_rule_hard_deleted", rule_id=rule_id)
-
     # ── Severity Priority Map ─────────────────────────────────────────────────
 
     async def list_severity_priority_map(self) -> list[SeverityPriorityMap]:
         return await self._sev_repo.list_all()
-
-    async def upsert_severity_priority_map(
-        self, payload: SeverityPriorityMapCreateRequest, admin_id: str
-    ) -> SeverityPriorityMap:
-        existing = await self._sev_repo.get_by_severity_and_tier(
-            payload.severity, str(payload.tier_id)
-        )
-        if existing:
-            old_priority              = existing.derived_priority
-            existing.derived_priority = payload.derived_priority
-            await self._session.flush()
-            await self._session.refresh(existing)
-            await audit_service.log(
-                entity_type="severity_priority_map",
-                entity_id=existing.id,
-                action="severity_priority_map_updated",
-                actor_id=uuid.UUID(admin_id),
-                actor_type="user",
-                old_value={"derived_priority": old_priority},
-                new_value={"derived_priority": payload.derived_priority},
-                changed_fields=["derived_priority"],
-            )
-            await self._session.commit()
-            return existing
-
-        mapping = SeverityPriorityMap(
-            severity=payload.severity,
-            tier_id=payload.tier_id,
-            derived_priority=payload.derived_priority,
-        )
-        self._session.add(mapping)
-        await self._session.flush()
-        await self._session.refresh(mapping)
-        await audit_service.log(
-            entity_type="severity_priority_map",
-            entity_id=mapping.id,
-            action="severity_priority_map_created",
-            actor_id=uuid.UUID(admin_id),
-            actor_type="user",
-            new_value={
-                "severity":         payload.severity,
-                "tier_id":          str(payload.tier_id),
-                "derived_priority": payload.derived_priority,
-            },
-        )
-        await self._session.commit()
-        return mapping
-
-    async def hard_delete_severity_priority_map(self, map_id: str, admin_id: str) -> None:
-        mapping = await self._sev_repo.get_by_id(map_id)
-        if not mapping:
-            raise NotFoundException(f"Severity priority map {map_id} not found.")
-        await self._sev_repo.hard_delete_severity_priority_map(map_id)
-        await self._session.commit()
-        logger.info("severity_priority_map_hard_deleted", map_id=map_id)
 
     # ── Keyword Rules ─────────────────────────────────────────────────────────
 
@@ -408,7 +302,6 @@ class AdminService:
     async def report_open_tickets_by_priority(self) -> dict:
         result = await self._session.execute(
             select(Ticket.priority, func.count(Ticket.id).label("count"))
-            .where(Ticket.status == "assigned")
             .group_by(Ticket.priority)
             .order_by(Ticket.priority)
         )
@@ -462,6 +355,62 @@ class AdminService:
             "max_resolution_time_min": round((row.max_seconds or 0) / 60, 1),
         }
 
+    async def update_sla_rule(
+    self, rule_id: str, payload: SLARuleUpdateRequest, admin_id: str
+) -> SLARule:
+        rule = await self._sla_repo.get_by_id(rule_id)
+        if not rule:
+            raise NotFoundException(f"SLA rule {rule_id} not found.")
+        old_value = {
+            "response_time_min":   rule.response_time_min,
+            "resolution_time_min": rule.resolution_time_min,
+        }
+        rule.response_time_min   = payload.response_time_min
+        rule.resolution_time_min = payload.resolution_time_min
+        await self._session.flush()
+        await self._session.refresh(rule)
+        await audit_service.log(
+            entity_type="sla_rule",
+            entity_id=rule.id,
+            action="sla_rule_updated",
+            actor_id=uuid.UUID(admin_id),
+            actor_type="user",
+            old_value=old_value,
+            new_value={
+                "response_time_min":   payload.response_time_min,
+                "resolution_time_min": payload.resolution_time_min,
+            },
+            changed_fields=["response_time_min", "resolution_time_min"],
+        )
+        await self._session.commit()
+        logger.info("sla_rule_updated", rule_id=rule_id)
+        return rule
+
+
+    async def update_severity_priority_map(
+        self, map_id: str, payload: SeverityPriorityMapUpdateRequest, admin_id: str
+    ) -> SeverityPriorityMap:
+        mapping = await self._sev_repo.get_by_id(map_id)
+        if not mapping:
+            raise NotFoundException(f"Severity priority map {map_id} not found.")
+        old_priority              = mapping.derived_priority
+        mapping.derived_priority  = payload.derived_priority
+        await self._session.flush()
+        await self._session.refresh(mapping)
+        await audit_service.log(
+            entity_type="severity_priority_map",
+            entity_id=mapping.id,
+            action="severity_priority_map_updated",
+            actor_id=uuid.UUID(admin_id),
+            actor_type="user",
+            old_value={"derived_priority": old_priority},
+            new_value={"derived_priority": payload.derived_priority},
+            changed_fields=["derived_priority"],
+        )
+        await self._session.commit()
+        logger.info("severity_priority_map_updated", map_id=map_id)
+        return mapping
+
     async def report_sla_breach_by_severity(self) -> dict:
         from sqlalchemy import func, select
         from src.data.models.postgres.models import Ticket
@@ -503,11 +452,11 @@ class AdminService:
         from src.data.models.postgres.models import Ticket
  
         # Only "assigned" counts as active work-in-progress
-        assigned_status = "assigned"
+        OPEN_STATUSES = ("new", "acknowledged", "assigned", "in_progress", "on_hold")
  
         # 1. assigned ticket count
         assigned_res = await self._session.execute(
-            select(func.count(Ticket.id)).where(Ticket.status == assigned_status)
+            select(func.count(Ticket.id)).where(Ticket.status.in_(OPEN_STATUSES))
         )
         assigned_count: int = assigned_res.scalar_one() or 0
  
@@ -536,7 +485,7 @@ class AdminService:
         resolved_today: int = today_res.scalar_one() or 0
  
         return {
-            "open_ticket_count":      assigned_count,   # key kept for frontend compat
+            "open_ticket_count":      assigned_count,   
             "total_sla_breaches":     total_breaches,
             "avg_first_response_min": round((avg_seconds or 0) / 60, 1),
             "tickets_resolved_today": resolved_today,
@@ -652,6 +601,29 @@ class AdminService:
                 (row.median_seconds or 0) / 60, 2
             ),
         }
+    
+    async def toggle_sla_rule(self, rule_id: str, admin_id: str) -> SLARule:
+        rule = await self._sla_repo.get_by_id(rule_id)
+        if not rule:
+            raise NotFoundException(f"SLA rule {rule_id} not found.")
+        rule.is_active = not rule.is_active
+        await self._session.flush()
+        await self._session.refresh(rule)
+        await self._session.commit()
+        logger.info("sla_rule_toggled", rule_id=rule_id, is_active=rule.is_active)
+        return rule
+
+
+    async def toggle_severity_priority_map(self, map_id: str, admin_id: str) -> SeverityPriorityMap:
+        mapping = await self._sev_repo.get_by_id(map_id)
+        if not mapping:
+            raise NotFoundException(f"Severity priority map {map_id} not found.")
+        mapping.is_active = not mapping.is_active
+        await self._session.flush()
+        await self._session.refresh(mapping)
+        await self._session.commit()
+        logger.info("severity_priority_map_toggled", map_id=map_id, is_active=mapping.is_active)
+        return mapping
 
     async def report_tickets_by_product(self, admin_token: str) -> dict:
         result = await self._session.execute(

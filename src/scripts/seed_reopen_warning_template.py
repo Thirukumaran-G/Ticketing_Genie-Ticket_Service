@@ -1,27 +1,26 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
-
 from src.observability.logging.logger import get_logger
 
 logger = get_logger(__name__)
 
 TEMPLATES = [
     {
-        "key":       "sla_apology",
-        "name":      "SLA Breach Apology",
-        "subject":   "We apologise for the delay on your ticket [{ticket_number}]",
+        "key":     "reopen_warning",
+        "name":    "Reopen Warning",
+        "subject": "Important notice regarding your ticket [{ticket_number}]",
         "body": (
             "Dear {customer_name},\n\n"
-            "We sincerely apologise for the delay in resolving your support ticket "
-            "{ticket_number} — {ticket_title}.\n\n"
-            "We understand this has caused inconvenience and we take full responsibility "
-            "for not meeting our committed response time.\n\n"
-            "Our team is actively working on your issue and you will hear from us by "
-            "{commit_time}.\n\n"
+            "We noticed that your ticket {ticket_number} — {ticket_title} "
+            "has been reopened {reopen_count} times.\n\n"
+            "To help us serve you better, we kindly request that you raise a "
+            "new ticket for any new or ongoing issues rather than reopening a "
+            "previously closed one.\n\n"
+            "This ensures your issue gets the correct priority and is handled "
+            "by the right team without delay.\n\n"
             "{custom_message}\n\n"
-            "Thank you for your patience and understanding.\n\n"
+            "Thank you for your understanding.\n\n"
             "Best regards,\n"
             "{team_lead_name}\n"
             "Support Team Lead\n"
@@ -31,7 +30,7 @@ TEMPLATES = [
             "customer_name",
             "ticket_number",
             "ticket_title",
-            "commit_time",
+            "reopen_count",
             "custom_message",
             "team_lead_name",
         ],
@@ -53,19 +52,11 @@ async def seed() -> None:
                 )
             )
             row = existing.scalar_one_or_none()
-
             if row:
-                # Update body/subject/variables if template already exists
-                # but never overwrite TL edits to body — only update if unchanged
                 row.name      = tpl_data["name"]
                 row.variables = tpl_data["variables"]
                 row.is_active = tpl_data["is_active"]
-                # Only reset subject/body if they still match the original
-                # (meaning TL has not customised them yet)
-                logger.info(
-                    "notification_template_exists_skipping_body",
-                    key=tpl_data["key"],
-                )
+                logger.info("reopen_warning_template_exists_skipping_body", key=tpl_data["key"])
             else:
                 import uuid6
                 new_tpl = NotificationTemplate(
@@ -78,10 +69,10 @@ async def seed() -> None:
                     is_active=tpl_data["is_active"],
                 )
                 session.add(new_tpl)
-                logger.info("notification_template_seeded", key=tpl_data["key"])
+                logger.info("reopen_warning_template_seeded", key=tpl_data["key"])
 
         await session.commit()
-        logger.info("notification_templates_seed_complete", count=len(TEMPLATES))
+        logger.info("reopen_warning_seed_complete")
 
 
 if __name__ == "__main__":

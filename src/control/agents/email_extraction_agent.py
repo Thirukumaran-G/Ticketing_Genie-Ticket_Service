@@ -39,7 +39,7 @@ class _LLMExtraction(BaseModel):
         description=(
             "Copy the EXACT words the sender used to name the product, system, or service "
             "they are reporting an issue with — ONLY if they named it explicitly by name. "
-            "Examples of EXPLICIT naming: 'Grocenow', 'PayFlow', 'DataSync Pro'. "
+            "Examples of EXPLICIT naming: 'Grocenow', 'GTK-Funds', 'Ecommerce workflow'. "
             "Examples that are NOT explicit names — return null for these: "
             "'our platform', 'the app', 'the system', 'our service', 'the website', "
             "'our tool', 'the portal', 'our product'. "
@@ -100,16 +100,6 @@ Return ONLY the structured fields. No commentary."""
 
     @staticmethod
     def _match_product(raw: str | None, valid_products: list[str]) -> str | None:
-        """
-        Deterministic Python matching — the LLM never sees the product list,
-        so it cannot hallucinate from it.
-
-        Match order:
-          1. Exact match (case-insensitive)
-          2. raw is a substring of a product name  e.g. "groce" inside "Grocenow"
-          3. product name is a substring of raw    e.g. "Grocenow" inside "Grocenow platform"
-          4. No match -> None
-        """
         if not raw:
             return None
 

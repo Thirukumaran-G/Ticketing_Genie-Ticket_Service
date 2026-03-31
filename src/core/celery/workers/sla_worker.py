@@ -26,6 +26,27 @@ def _fmt_dt(dt) -> str:
     return dt.astimezone(_IST).strftime("%d %b %Y, %I:%M %p IST")
 
 
+def _fmt_duration(minutes: int) -> str:
+    """Format minutes into human-readable duration."""
+    if minutes < 60:
+        return f"{minutes} minute(s)"
+    elif minutes < 1440:
+        hours = minutes // 60
+        mins  = minutes % 60
+        return f"{hours} hour(s) {mins} minute(s)" if mins else f"{hours} hour(s)"
+    else:
+        days  = minutes // 1440
+        rem   = minutes % 1440
+        hours = rem // 60
+        mins  = rem % 60
+        parts = f"{days} day(s)"
+        if hours:
+            parts += f" {hours} hour(s)"
+        if mins:
+            parts += f" {mins} minute(s)"
+        return parts
+
+
 def _tier(ticket) -> str:
     raw = (ticket.tier_snapshot or "").lower().strip()
     return _TIER_LABEL.get(raw, ticket.tier_snapshot or "N/A")
@@ -81,7 +102,7 @@ def check_sla_breaches() -> None:
                         effective  = max(elapsed - hold_mins, 0)
                         resp_pct   = (effective / total_mins * 100) if total_mins > 0 else 100
                         mins_left  = max(round(total_mins - effective), 0)
-                        due_str    = _fmt_dt(resp_due)   # FIX: IST
+                        due_str    = _fmt_dt(resp_due)
 
                         if now >= resp_due:
                             await ticket_repo.update_fields(
@@ -365,7 +386,7 @@ def check_sla_breaches() -> None:
                         effective  = max(elapsed - hold_mins, 0)
                         res_pct    = (effective / total_mins * 100) if total_mins > 0 else 100
                         mins_left  = max(round(total_mins - effective), 0)
-                        due_str    = _fmt_dt(res_due)   # FIX: IST
+                        due_str    = _fmt_dt(res_due)
 
                         if now >= res_due:
                             await ticket_repo.update_fields(
@@ -688,7 +709,9 @@ def escalate_critical_unresponded() -> None:
                 breached_since_mins = round(
                     (now - ticket.sla_breached_at).total_seconds() / 60
                 )
-                breached_at_str = _fmt_dt(ticket.sla_breached_at)   # FIX: IST
+                breached_since_str  = _fmt_duration(breached_since_mins)
+                interval_str        = _fmt_duration(interval_mins)
+                breached_at_str     = _fmt_dt(ticket.sla_breached_at)
 
                 if ticket.team_id:
                     r    = await session.execute(
@@ -714,7 +737,7 @@ def escalate_critical_unresponded() -> None:
                             notif_type="sla_escalation_reminder",
                             title=(
                                 f"Escalation reminder — {ticket.ticket_number} still unresolved "
-                                f"{breached_since_mins} min after SLA breach"
+                                f"{breached_since_str} after SLA breach"
                             ),
                             message=(
                                 f"This ticket has breached its resolution SLA and is still open.\n\n"
@@ -726,13 +749,13 @@ def escalate_critical_unresponded() -> None:
                                 f"Current Status  : {ticket.status}\n"
                                 f"Assigned Agent  : {agent_name}\n"
                                 f"Breached At     : {breached_at_str}\n"
-                                f"Breached Since  : {breached_since_mins} minute(s) ago\n\n"
+                                f"Breached Since  : {breached_since_str} ago\n\n"
                                 f"Immediate intervention is required. You will receive this "
-                                f"reminder every {interval_mins} minutes until resolved or closed."
+                                f"reminder every {interval_str} until resolved or closed."
                             ),
                             email_subject=(
                                 f"[{ticket.ticket_number}] Escalation reminder — still unresolved "
-                                f"{breached_since_mins} min after SLA breach"
+                                f"{breached_since_str} after SLA breach"
                             ),
                             email_body=(
                                 f"Hi,\n\n"
@@ -745,12 +768,12 @@ def escalate_critical_unresponded() -> None:
                                 f"Current Status   : {ticket.status}\n"
                                 f"Assigned Agent   : {agent_name}\n"
                                 f"Breached At      : {breached_at_str}\n"
-                                f"Breached Since   : {breached_since_mins} minute(s) ago\n\n"
+                                f"Breached Since   : {breached_since_str} ago\n\n"
                                 f"This ticket has breached its resolution SLA and remains open.\n\n"
                                 f"Please log in to the portal immediately to intervene, "
                                 f"reassign, or escalate this ticket.\n\n"
                                 f"You will continue to receive this reminder every "
-                                f"{interval_mins} minutes until the ticket is resolved or closed.\n\n"
+                                f"{interval_str} until the ticket is resolved or closed.\n\n"
                                 f"— Ticketing Genie"
                             ),
                             is_internal=True,

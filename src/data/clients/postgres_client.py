@@ -1,11 +1,15 @@
 from collections.abc import AsyncGenerator
 
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from src.config.settings import settings
+from src.core.exceptions.base import ConflictException
+from src.observability.logging.logger import get_logger
 
-# ── FastAPI engine — persistent pool for HTTP request lifecycle ───────────────
+logger = get_logger(__name__)
+
 engine = create_async_engine(
     settings.DATABASE_URL,
     echo=False,
@@ -41,7 +45,6 @@ FreshReadSessionFactory = async_sessionmaker(
     autocommit=False,
 )
 
-# ── Celery engine — NullPool, fresh connection per task ──────────────────────
 celery_engine = create_async_engine(
     settings.DATABASE_URL,
     echo=False,
@@ -59,11 +62,20 @@ CelerySessionFactory = async_sessionmaker(
 
 
 async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
-    """FastAPI dependency — persistent pool, full transaction control."""
     async with AsyncSessionFactory() as session:
         try:
             yield session
             await session.commit()
+        except IntegrityError as exc:
+            await session.rollback()
+            logger.warning("db_integrity_error", detail=str(exc.orig))
+            raise ConflictException(
+                "A conflicting record already exists. Please check your input and try again."
+            ) from exc
+        except SQLAlchemyError as exc:
+            await session.rollback()
+            logger.error("db_sqlalchemy_error", detail=str(exc))
+            raise
         except Exception:
             await session.rollback()
             raise
@@ -72,9 +84,6 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def get_fresh_read_session() -> AsyncGenerator[AsyncSession, None]:
-    """FastAPI dependency — AUTOCOMMIT, always sees latest committed rows.
-    Use for read endpoints that must reflect writes from other services/processes.
-    Do NOT use for writes or multi-statement transactions."""
     async with FreshReadSessionFactory() as session:
         try:
             yield session

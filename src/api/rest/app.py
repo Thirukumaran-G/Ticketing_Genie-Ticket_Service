@@ -8,7 +8,6 @@ from sqlalchemy import text
 
 from src.api.middleware.error_handler import setup_error_handlers
 from src.api.middleware.cors import setup_cors
-from src.api.middleware.trustedhost import setup_trusted_hosts
 from src.api.rest.routes.admin_routes import router as admin_router
 from src.api.rest.routes.customer_routes import router as customer_router
 from src.api.rest.routes.agent_routes import router as agent_router
@@ -114,9 +113,7 @@ def create_app() -> FastAPI:
         app.openapi_schema = openapi_schema
         return app.openapi_schema
 
-    app.openapi = custom_openapi  # type: ignore[method-assign]
-
-    setup_trusted_hosts(app)
+    app.openapi = custom_openapi 
     setup_cors(app)
     setup_error_handlers(app)
 

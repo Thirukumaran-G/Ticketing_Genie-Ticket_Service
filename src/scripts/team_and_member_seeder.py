@@ -1,3 +1,4 @@
+# src/scripts/team_and_member_seeder.py
 from __future__ import annotations
 
 import asyncio
@@ -12,18 +13,12 @@ from src.observability.logging.logger import get_logger
 
 logger = get_logger(__name__)
 
-# ── Embedding model ───────────────────────────────────────────────────────────
-# all-MiniLM-L6-v2 → 384-dim — same model used across ticket + persona
 _embed_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 
 
 def _embed(text_: str) -> list[float]:
     return _embed_model.encode(text_, normalize_embeddings=True).tolist()
 
-
-# ── Team definitions ──────────────────────────────────────────────────────────
-# Same 4 teams are seeded for every product in PRODUCT_CODES.
-# team_lead_email is resolved to user_id at runtime.
 
 PRODUCT_CODES = ["PROD-001", "PROD-002", "PROD-003"]
 
@@ -191,12 +186,14 @@ async def seed_teams() -> None:
                     # seed team without lead rather than skipping
 
                 # ── Upsert team ───────────────────────────────────────────────
+                # FIX: use .scalars().first() instead of .scalar_one_or_none()
+                # to tolerate any pre-existing duplicate rows in the DB
                 existing_team = (await session.execute(
                     select(Team).where(
                         Team.name       == team_def["name"],
                         Team.product_id == product_id,
                     )
-                )).scalar_one_or_none()
+                )).scalars().first()
 
                 if existing_team:
                     logger.info(
@@ -235,12 +232,14 @@ async def seed_teams() -> None:
                         members_skipped += 1
                         continue
 
+                    # FIX: use .scalars().first() instead of .scalar_one_or_none()
+                    # to tolerate any pre-existing duplicate rows in the DB
                     existing_member = (await session.execute(
                         select(TeamMember).where(
                             TeamMember.team_id == team.id,
                             TeamMember.user_id == user_id,
                         )
-                    )).scalar_one_or_none()
+                    )).scalars().first()
 
                     if existing_member:
                         logger.info(

@@ -80,7 +80,8 @@ class TicketRepository:
             "in_progress",
             "on_hold",
             "reopened",
-            "resolved"
+            "resolved",
+            "closed"
         ]
         r = await self._s.execute(
             select(Ticket)

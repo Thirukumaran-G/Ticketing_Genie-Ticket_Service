@@ -406,6 +406,20 @@ async def send_apology(
         message=result["message"],
     )
 
+@router.post("/tickets/{ticket_id}/send-reopen-warning")
+async def send_reopen_warning(
+    ticket_id: str,
+    payload:   SendApologyRequest,       # reuse same schema
+    actor:     CurrentActor = _TLActor,
+    svc:       TeamLeadService    = Depends(_tl_svc),
+) -> dict:
+    return await svc.send_reopen_warning(
+        ticket_id=ticket_id,
+        template_id=payload.template_id,
+        custom_message=payload.custom_message,
+        team_lead_name=actor.email or "Team Lead",
+    )
+
 @router.patch("/members/{agent_user_id}/skill")
 async def update_agent_skill(
     agent_user_id: str,

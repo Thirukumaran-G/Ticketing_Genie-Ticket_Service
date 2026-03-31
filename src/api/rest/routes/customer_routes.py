@@ -122,3 +122,12 @@ async def customer_close_ticket(
     svc:       TicketService = Depends(_svc),
 ) -> None:
     await svc.close_ticket(ticket_id=ticket_id, customer_id=actor.actor_id)
+
+@router.get("/products", response_model=list[dict])
+async def list_subscribed_products(
+    actor: CurrentActor = _CustomerActor,
+    svc:   TicketService = Depends(_svc),
+) -> list[dict]:
+    if not actor.product_tiers:
+        return []
+    return await svc.list_subscribed_products_by_ids(list(actor.product_tiers.keys()))

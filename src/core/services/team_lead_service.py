@@ -570,6 +570,54 @@ class TeamLeadService:
         await self._session.commit()
         return tpl
 
+    async def send_reopen_warning(
+    self,
+    ticket_id:      str,
+    template_id:    str,
+    custom_message: str | None,
+    team_lead_name: str,
+) -> dict:
+        from sqlalchemy import select
+        from src.data.models.postgres.models import NotificationTemplate
+
+        ticket = await self._repo.get_by_id(ticket_id)
+        if not ticket:
+            raise HTTPException(status_code=404, detail="Ticket not found.")
+
+        result = await self._session.execute(
+            select(NotificationTemplate).where(
+                NotificationTemplate.id == uuid.UUID(template_id),
+                NotificationTemplate.is_active.is_(True),
+            )
+        )
+        tpl = result.scalar_one_or_none()
+        if not tpl:
+            raise HTTPException(status_code=404, detail="Template not found.")
+
+        body = tpl.body
+        for k, v in {
+            "customer_name":  "Customer",
+            "ticket_number":  ticket.ticket_number,
+            "ticket_title":   ticket.title or "",
+            "reopen_count":   str(ticket.reopen_count),
+            "custom_message": custom_message or "",
+            "team_lead_name": team_lead_name,
+        }.items():
+            body = body.replace(f"{{{k}}}", v)
+
+        subject = tpl.subject.replace("{ticket_number}", ticket.ticket_number)
+
+        notif_svc = NotificationService(self._session, self._background_tasks)
+        return await notif_svc.notify(
+            recipient_id=str(ticket.customer_id),
+            ticket=ticket,
+            notif_type="reopen_warning",
+            title=f"Please raise a new ticket [{ticket.ticket_number}]",
+            message=body,
+            is_internal=False,
+            email_subject=subject,
+            email_body=body,
+        )
     # ── Send Apology ──────────────────────────────────────────────────────────
 
     async def send_apology(
@@ -668,6 +716,8 @@ class TeamLeadService:
             "template_key": tpl.key,
             "message":      body[:300],
         }
+    
+
 
 
 def _substitute_variables(template_str: str, variables: dict) -> str:

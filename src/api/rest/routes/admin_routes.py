@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, Request, Response
+from sqlalchemy.exc import IntegrityError
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.rest.dependencies import CurrentActor, ROLE_ADMIN, require_role
+from src.core.exceptions.base import ConflictException, ForbiddenException, NotFoundException
 from src.core.services.admin_service import AdminService
 from src.core.services.team_service import TeamService
 from src.data.clients.postgres_client import get_db_session
@@ -14,9 +16,7 @@ from src.schemas.admin_schema import (
     EmailConfigResponse,
     ProductConfigUpsertRequest,
     ProductConfigResponse,
-    SLARuleCreateRequest,
     SLARuleResponse,
-    SeverityPriorityMapCreateRequest,
     SeverityPriorityMapResponse,
     KeywordRuleCreateRequest,
     KeywordRuleResponse,
@@ -25,7 +25,9 @@ from src.schemas.admin_schema import (
     TeamMemberAddRequest,
     TeamMemberResponse,
     TeamResponse,
-    EmailConfigCreateRequest
+    EmailConfigCreateRequest,
+    SLARuleUpdateRequest,
+    SeverityPriorityMapUpdateRequest
 )
 
 router = APIRouter(prefix="/admin", tags=["Admin — Configuration"])
@@ -45,7 +47,8 @@ def _get_token(request: Request) -> str:
     return request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
 
 
-# list tiers
+# ── Tiers / Products ──────────────────────────────────────────────────────────
+
 @router.get("/tiers", summary="List tiers from auth-service")
 async def list_tiers(
     request: Request,
@@ -54,7 +57,7 @@ async def list_tiers(
 ) -> list[dict]:
     return await service.list_tiers(_get_token(request))
 
-# list products
+
 @router.get("/products", summary="List products from auth-service")
 async def list_products(
     request: Request,
@@ -64,12 +67,9 @@ async def list_products(
     return await service.list_products(_get_token(request))
 
 
-# list the email config
-@router.get(
-    "/email-config",
-    response_model=list[EmailConfigResponse],
-    summary="List email config (secrets masked)",
-)
+# ── Email Config ──────────────────────────────────────────────────────────────
+
+@router.get("/email-config", response_model=list[EmailConfigResponse])
 async def list_email_config(
     actor:   CurrentActor = _AdminActor,
     service: AdminService = Depends(_admin_svc),
@@ -77,12 +77,8 @@ async def list_email_config(
     configs = await service.list_email_config()
     return [EmailConfigResponse.model_validate(c) for c in configs]
 
-# update email congig
-@router.put(
-    "/email-config",
-    response_model=list[EmailConfigResponse],
-    summary="upsert email config — IMAP_USER and IMAP_PASSWORD only",
-)
+
+@router.put("/email-config", response_model=list[EmailConfigResponse])
 async def upsert_email_config(
     payload: list[EmailConfigUpdateRequest],
     actor:   CurrentActor = _AdminActor,
@@ -91,13 +87,8 @@ async def upsert_email_config(
     configs = await service.upsert_email_config(payload, actor.actor_id)
     return [EmailConfigResponse.model_validate(c) for c in configs]
 
-# new email config
-@router.post(
-    "/email-config",
-    response_model=EmailConfigResponse,
-    status_code=201,
-    summary="Create a new email config entry",
-)
+
+@router.post("/email-config", response_model=EmailConfigResponse, status_code=201)
 async def create_email_config(
     payload: EmailConfigCreateRequest,
     actor:   CurrentActor = _AdminActor,
@@ -112,14 +103,7 @@ async def create_email_config(
     return EmailConfigResponse.model_validate(config)
 
 
-# delete email config
-@router.delete(
-    "/email-config/{key}",
-    status_code=204,
-    response_class=Response,
-    response_model=None,
-    summary="Hard delete an email config entry",
-)
+@router.delete("/email-config/{key}", status_code=204, response_class=Response, response_model=None)
 async def delete_email_config(
     key:     str,
     actor:   CurrentActor = _AdminActor,
@@ -128,12 +112,9 @@ async def delete_email_config(
     await service.delete_email_config(key, actor.actor_id)
 
 
-# get sla rules 
-@router.get(
-    "/sla-rules",
-    response_model=list[SLARuleResponse],
-    summary="List all active SLA rules",
-)
+# ── SLA Rules ─────────────────────────────────────────────────────────────────
+
+@router.get("/sla-rules", response_model=list[SLARuleResponse])
 async def list_sla_rules(
     actor:   CurrentActor = _AdminActor,
     service: AdminService = Depends(_admin_svc),
@@ -142,44 +123,9 @@ async def list_sla_rules(
     return [SLARuleResponse.model_validate(r) for r in rules]
 
 
-# create new sla rule
-@router.post(
-    "/sla-rules",
-    response_model=SLARuleResponse,
-    status_code=201,
-    summary="Create or update SLA rule (upsert by tier_id + priority)",
-)
-async def upsert_sla_rule(
-    payload: SLARuleCreateRequest,
-    actor:   CurrentActor = _AdminActor,
-    service: AdminService = Depends(_admin_svc),
-) -> SLARuleResponse:
-    rule = await service.upsert_sla_rule(payload, actor.actor_id)
-    return SLARuleResponse.model_validate(rule)
+# ── Severity Priority Map ─────────────────────────────────────────────────────
 
-
-# delete sla rule
-@router.delete(
-    "/sla-rules/{rule_id}",
-    status_code=204,
-    response_class=Response,
-    response_model=None,
-    summary="Hard delete an SLA rule",
-)
-async def delete_sla_rule(
-    rule_id: uuid.UUID,
-    actor:   CurrentActor = _AdminActor,
-    service: AdminService = Depends(_admin_svc),
-) -> None:
-    await service.hard_delete_sla_rule(str(rule_id), actor.actor_id)
-
-
-# set severity-priority map
-@router.get(
-    "/severity-priority-map",
-    response_model=list[SeverityPriorityMapResponse],
-    summary="List all severity → priority mappings",
-)
+@router.get("/severity-priority-map", response_model=list[SeverityPriorityMapResponse])
 async def list_severity_priority_map(
     actor:   CurrentActor = _AdminActor,
     service: AdminService = Depends(_admin_svc),
@@ -188,43 +134,51 @@ async def list_severity_priority_map(
     return [SeverityPriorityMapResponse.model_validate(m) for m in mappings]
 
 
-# create new severity-priority mapping
-@router.post(
-    "/severity-priority-map",
-    response_model=SeverityPriorityMapResponse,
-    status_code=201,
-    summary="Upsert severity → priority mapping",
-)
-async def upsert_severity_priority_map(
-    payload: SeverityPriorityMapCreateRequest,
+@router.patch("/sla-rules/{rule_id}", response_model=SLARuleResponse)
+async def update_sla_rule(
+    rule_id: uuid.UUID,
+    payload: SLARuleUpdateRequest,
+    actor:   CurrentActor = _AdminActor,
+    service: AdminService = Depends(_admin_svc),
+) -> SLARuleResponse:
+    rule = await service.update_sla_rule(str(rule_id), payload, actor.actor_id)
+    return SLARuleResponse.model_validate(rule)
+
+
+@router.patch("/severity-priority-map/{map_id}", response_model=SeverityPriorityMapResponse)
+async def update_severity_priority_map(
+    map_id:  uuid.UUID,
+    payload: SeverityPriorityMapUpdateRequest,
     actor:   CurrentActor = _AdminActor,
     service: AdminService = Depends(_admin_svc),
 ) -> SeverityPriorityMapResponse:
-    mapping = await service.upsert_severity_priority_map(payload, actor.actor_id)
+    mapping = await service.update_severity_priority_map(str(map_id), payload, actor.actor_id)
     return SeverityPriorityMapResponse.model_validate(mapping)
 
-# delete severity-priority map
-@router.delete(
-    "/severity-priority-map/{map_id}",
-    status_code=204,
-    response_class=Response,
-    response_model=None,
-    summary="Hard delete a severity → priority mapping",
-)
-async def delete_severity_priority_map(
+
+@router.patch("/sla-rules/{rule_id}/toggle", response_model=SLARuleResponse)
+async def toggle_sla_rule(
+    rule_id: uuid.UUID,
+    actor:   CurrentActor = _AdminActor,
+    service: AdminService = Depends(_admin_svc),
+) -> SLARuleResponse:
+    rule = await service.toggle_sla_rule(str(rule_id), actor.actor_id)
+    return SLARuleResponse.model_validate(rule)
+
+
+@router.patch("/severity-priority-map/{map_id}/toggle", response_model=SeverityPriorityMapResponse)
+async def toggle_severity_priority_map(
     map_id:  uuid.UUID,
     actor:   CurrentActor = _AdminActor,
     service: AdminService = Depends(_admin_svc),
-) -> None:
-    await service.hard_delete_severity_priority_map(str(map_id), actor.actor_id)
+) -> SeverityPriorityMapResponse:
+    mapping = await service.toggle_severity_priority_map(str(map_id), actor.actor_id)
+    return SeverityPriorityMapResponse.model_validate(mapping)
 
 
-# keyword rules
-@router.get(
-    "/keyword-rules",
-    response_model=list[KeywordRuleResponse],
-    summary="List all active keyword rules",
-)
+# ── Keyword Rules ─────────────────────────────────────────────────────────────
+
+@router.get("/keyword-rules", response_model=list[KeywordRuleResponse])
 async def list_keyword_rules(
     actor:   CurrentActor = _AdminActor,
     service: AdminService = Depends(_admin_svc),
@@ -233,12 +187,7 @@ async def list_keyword_rules(
     return [KeywordRuleResponse.model_validate(r) for r in rules]
 
 
-@router.post(
-    "/keyword-rules",
-    response_model=KeywordRuleResponse,
-    status_code=201,
-    summary="Create a keyword rule",
-)
+@router.post("/keyword-rules", response_model=KeywordRuleResponse, status_code=201)
 async def create_keyword_rule(
     payload: KeywordRuleCreateRequest,
     actor:   CurrentActor = _AdminActor,
@@ -248,11 +197,7 @@ async def create_keyword_rule(
     return KeywordRuleResponse.model_validate(rule)
 
 
-@router.patch(
-    "/keyword-rules/{rule_id}",
-    response_model=KeywordRuleResponse,
-    summary="Update keyword or severity",
-)
+@router.patch("/keyword-rules/{rule_id}", response_model=KeywordRuleResponse)
 async def update_keyword_rule(
     rule_id: uuid.UUID,
     payload: KeywordRuleUpdateRequest,
@@ -263,13 +208,7 @@ async def update_keyword_rule(
     return KeywordRuleResponse.model_validate(rule)
 
 
-@router.delete(
-    "/keyword-rules/{rule_id}",
-    status_code=204,
-    response_class=Response,
-    response_model=None,
-    summary="Hard delete a keyword rule",
-)
+@router.delete("/keyword-rules/{rule_id}", status_code=204, response_class=Response, response_model=None)
 async def delete_keyword_rule(
     rule_id: uuid.UUID,
     actor:   CurrentActor = _AdminActor,
@@ -280,11 +219,7 @@ async def delete_keyword_rule(
 
 # ── Product Config ────────────────────────────────────────────────────────────
 
-@router.get(
-    "/product-config",
-    response_model=list[ProductConfigResponse],
-    summary="List all product configs",
-)
+@router.get("/product-config", response_model=list[ProductConfigResponse])
 async def list_product_configs(
     actor:   CurrentActor = _AdminActor,
     service: AdminService = Depends(_admin_svc),
@@ -293,30 +228,18 @@ async def list_product_configs(
     return [ProductConfigResponse.model_validate(c) for c in configs]
 
 
-@router.put(
-    "/product-config/{product_id}",
-    response_model=ProductConfigResponse,
-    summary="Upsert product config",
-)
+@router.put("/product-config/{product_id}", response_model=ProductConfigResponse)
 async def upsert_product_config(
     product_id: uuid.UUID,
     payload:    ProductConfigUpsertRequest,
     actor:      CurrentActor = _AdminActor,
     service:    AdminService = Depends(_admin_svc),
 ) -> ProductConfigResponse:
-    config = await service.upsert_product_config(
-        str(product_id), payload, actor.actor_id
-    )
+    config = await service.upsert_product_config(str(product_id), payload, actor.actor_id)
     return ProductConfigResponse.model_validate(config)
 
 
-@router.delete(
-    "/product-config/{product_id}",
-    status_code=204,
-    response_class=Response,
-    response_model=None,
-    summary="Hard delete product config",
-)
+@router.delete("/product-config/{product_id}", status_code=204, response_class=Response, response_model=None)
 async def hard_delete_product_config(
     product_id: uuid.UUID,
     actor:      CurrentActor = _AdminActor,
@@ -327,43 +250,35 @@ async def hard_delete_product_config(
 
 # ── Reports ───────────────────────────────────────────────────────────────────
 
-@router.get(
-    "/reports/open-tickets-by-priority",
-    summary="Open tickets grouped by priority",
-)
+@router.get("/reports/open-tickets-by-priority")
 async def report_open_tickets_by_priority(
-    actor:   CurrentActor = _AdminActor,
-    service: AdminService = Depends(_admin_svc),
+    actor: CurrentActor = _AdminActor, service: AdminService = Depends(_admin_svc)
 ) -> dict:
     return await service.report_open_tickets_by_priority()
 
 
-@router.get(
-    "/reports/sla-breaches-by-day",
-    summary="SLA breaches trend grouped by day",
-)
+@router.get("/reports/resolved-by-day")
+async def report_resolved_by_day(
+    actor: CurrentActor = _AdminActor, service: AdminService = Depends(_admin_svc)
+) -> dict:
+    return await service.report_resolved_by_day()
+
+
+@router.get("/reports/sla-breaches-by-day")
 async def report_sla_breaches_by_day(
-    actor:   CurrentActor = _AdminActor,
-    service: AdminService = Depends(_admin_svc),
+    actor: CurrentActor = _AdminActor, service: AdminService = Depends(_admin_svc)
 ) -> dict:
     return await service.report_sla_breaches_by_day()
 
 
-@router.get(
-    "/reports/first-response-time",
-    summary="Average and median first response time",
-)
+@router.get("/reports/first-response-time")
 async def report_first_response_time(
-    actor:   CurrentActor = _AdminActor,
-    service: AdminService = Depends(_admin_svc),
+    actor: CurrentActor = _AdminActor, service: AdminService = Depends(_admin_svc)
 ) -> dict:
     return await service.report_first_response_time()
 
 
-@router.get(
-    "/reports/tickets-by-product",
-    summary="Ticket stats by product",
-)
+@router.get("/reports/tickets-by-product")
 async def report_tickets_by_product(
     request: Request,
     actor:   CurrentActor = _AdminActor,
@@ -371,67 +286,59 @@ async def report_tickets_by_product(
 ) -> dict:
     return await service.report_tickets_by_product(_get_token(request))
 
-@router.get(
-    "/reports/dashboard-summary",
-    summary="Aggregated dashboard summary stats",
-)
+
+@router.get("/reports/dashboard-summary")
 async def report_dashboard_summary(
-    actor:   CurrentActor = _AdminActor,
-    service: AdminService = Depends(_admin_svc),
+    actor: CurrentActor = _AdminActor, service: AdminService = Depends(_admin_svc)
 ) -> dict:
     return await service.report_dashboard_summary()
 
-@router.get("/reports/tickets-by-severity", summary="Tickets grouped by severity")
+
+@router.get("/reports/tickets-by-severity")
 async def report_tickets_by_severity(
-    actor: CurrentActor = _AdminActor,
-    service: AdminService = Depends(_admin_svc),
+    actor: CurrentActor = _AdminActor, service: AdminService = Depends(_admin_svc)
 ) -> dict:
     return await service.report_tickets_by_severity()
 
-@router.get("/reports/tickets-by-status", summary="Tickets grouped by status")
+
+@router.get("/reports/tickets-by-status")
 async def report_tickets_by_status(
-    actor: CurrentActor = _AdminActor,
-    service: AdminService = Depends(_admin_svc),
+    actor: CurrentActor = _AdminActor, service: AdminService = Depends(_admin_svc)
 ) -> dict:
     return await service.report_tickets_by_status()
 
-@router.get("/reports/avg-resolution-time", summary="Average resolution time stats")
+
+@router.get("/reports/avg-resolution-time")
 async def report_avg_resolution_time(
-    actor: CurrentActor = _AdminActor,
-    service: AdminService = Depends(_admin_svc),
+    actor: CurrentActor = _AdminActor, service: AdminService = Depends(_admin_svc)
 ) -> dict:
     return await service.report_avg_resolution_time()
 
-@router.get("/reports/sla-breach-by-severity", summary="SLA breaches grouped by severity")
+
+@router.get("/reports/sla-breach-by-severity")
 async def report_sla_breach_by_severity(
-    actor: CurrentActor = _AdminActor,
-    service: AdminService = Depends(_admin_svc),
+    actor: CurrentActor = _AdminActor, service: AdminService = Depends(_admin_svc)
 ) -> dict:
     return await service.report_sla_breach_by_severity()
 
-@router.get("/reports/tickets-by-day", summary="Tickets created per day (last 30 days)")
+
+@router.get("/reports/tickets-by-day")
 async def report_tickets_by_day(
-    actor: CurrentActor = _AdminActor,
-    service: AdminService = Depends(_admin_svc),
+    actor: CurrentActor = _AdminActor, service: AdminService = Depends(_admin_svc)
 ) -> dict:
     return await service.report_tickets_created_by_day()
 
-@router.get("/reports/top-companies", summary="Top companies by ticket volume")
+
+@router.get("/reports/top-companies")
 async def report_top_companies(
-    actor: CurrentActor = _AdminActor,
-    service: AdminService = Depends(_admin_svc),
+    actor: CurrentActor = _AdminActor, service: AdminService = Depends(_admin_svc)
 ) -> dict:
     return await service.report_top_companies_by_tickets()
 
 
-
 # ── Teams ─────────────────────────────────────────────────────────────────────
 
-@router.get(
-    "/teams",
-    response_model=list[TeamResponse],
-    summary="List all active teams",
-)
+@router.get("/teams", response_model=list[TeamResponse])
 async def list_teams(
     actor:   CurrentActor = _AdminActor,
     service: TeamService  = Depends(_team_svc),
@@ -440,41 +347,45 @@ async def list_teams(
     return [TeamResponse.model_validate(t) for t in teams]
 
 
-@router.post(
-    "/teams",
-    response_model=TeamResponse,
-    status_code=201,
-    summary="Create a team",
-)
+@router.post("/teams", response_model=TeamResponse, status_code=201)
 async def create_team(
     payload: TeamCreateRequest,
     actor:   CurrentActor = _AdminActor,
     service: TeamService  = Depends(_team_svc),
 ) -> TeamResponse:
-    team = await service.create_team(payload, actor.actor_id)
-    return TeamResponse.model_validate(team)
+    try:
+        team = await service.create_team(payload, actor.actor_id)
+        return TeamResponse.model_validate(team)
+    except ConflictException as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
 
-@router.delete(
-    "/teams/{team_id}",
-    status_code=204,
-    response_class=Response,
-    response_model=None,
-    summary="Deactivate a team",
-)
+@router.delete("/teams/{team_id}", status_code=204, response_class=Response, response_model=None)
 async def deactivate_team(
     team_id: uuid.UUID,
     actor:   CurrentActor = _AdminActor,
     service: TeamService  = Depends(_team_svc),
 ) -> None:
-    await service.deactivate_team(str(team_id), actor.actor_id)
+    try:
+        await service.deactivate_team(str(team_id), actor.actor_id)
+    except NotFoundException as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
 
 
-@router.get(
-    "/products/{product_id}/teams",
-    response_model=list[TeamResponse],
-    summary="Get all active teams for a product",
-)
+@router.patch("/teams/{team_id}/remove-lead", response_model=TeamResponse)
+async def remove_team_lead(
+    team_id: uuid.UUID,
+    actor:   CurrentActor = _AdminActor,
+    service: TeamService  = Depends(_team_svc),
+) -> TeamResponse:
+    try:
+        team = await service.remove_lead(str(team_id), actor.actor_id)
+        return TeamResponse.model_validate(team)
+    except NotFoundException as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.get("/products/{product_id}/teams", response_model=list[TeamResponse])
 async def list_teams_by_product(
     product_id: uuid.UUID,
     actor:      CurrentActor = _AdminActor,
@@ -486,25 +397,26 @@ async def list_teams_by_product(
 
 # ── Team Members ──────────────────────────────────────────────────────────────
 
-@router.post(
-    "/teams/{team_id}/members",
-    response_model=TeamMemberResponse,
-    status_code=201,
-    summary="Add a member to a team — skill text is auto-embedded",
-)
+@router.post("/teams/{team_id}/members", response_model=TeamMemberResponse, status_code=201)
 async def add_team_member(
     team_id: uuid.UUID,
     payload: TeamMemberAddRequest,
     actor:   CurrentActor = _AdminActor,
     service: TeamService  = Depends(_team_svc),
 ) -> TeamMemberResponse:
-    member = await service.add_member(str(team_id), payload, actor.actor_id)
-    return TeamMemberResponse.model_validate(member)
+    try:
+        member = await service.add_member(str(team_id), payload, actor.actor_id)
+        return TeamMemberResponse.model_validate(member)
+    except ConflictException as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except NotFoundException as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except IntegrityError:
+        # Final safety net — should never reach here after service-level checks
+        raise HTTPException(status_code=409, detail="This user is already a member of this team.")
 
-@router.get(
-    "/teams/{team_id}/members",
-    summary="List members of a team",
-)
+
+@router.get("/teams/{team_id}/members")
 async def list_team_members(
     team_id: uuid.UUID,
     actor:   CurrentActor = _AdminActor,
@@ -518,7 +430,6 @@ async def list_team_members(
     status_code=204,
     response_class=Response,
     response_model=None,
-    summary="Remove a member from a team",
 )
 async def remove_team_member(
     team_id:   uuid.UUID,
@@ -526,5 +437,9 @@ async def remove_team_member(
     actor:     CurrentActor = _AdminActor,
     service:   TeamService  = Depends(_team_svc),
 ) -> None:
-    await service.remove_member(str(member_id), actor.actor_id)
-
+    try:
+        await service.remove_member(str(team_id), str(member_id), actor.actor_id)
+    except NotFoundException as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ForbiddenException as exc:
+        raise HTTPException(status_code=403, detail=str(exc))

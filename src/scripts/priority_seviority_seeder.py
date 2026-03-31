@@ -20,12 +20,15 @@ PRI_SEV_DATA: list[dict] = [
     {"severity": "critical", "tier": "starter",    "derived_priority": "P0"},
     {"severity": "critical", "tier": "standard",   "derived_priority": "P0"},
     {"severity": "critical", "tier": "enterprise", "derived_priority": "P0"},
-    {"severity": "high",     "tier": "starter",    "derived_priority": "P2"},
+
+    {"severity": "high",     "tier": "starter",    "derived_priority": "P1"},
     {"severity": "high",     "tier": "standard",   "derived_priority": "P1"},
     {"severity": "high",     "tier": "enterprise", "derived_priority": "P0"},
-    {"severity": "medium",   "tier": "starter",    "derived_priority": "P3"},
+
+    {"severity": "medium",   "tier": "starter",    "derived_priority": "P2"},
     {"severity": "medium",   "tier": "standard",   "derived_priority": "P2"},
     {"severity": "medium",   "tier": "enterprise", "derived_priority": "P1"},
+
     {"severity": "low",      "tier": "starter",    "derived_priority": "P3"},
     {"severity": "low",      "tier": "standard",   "derived_priority": "P3"},
     {"severity": "low",      "tier": "enterprise", "derived_priority": "P2"},

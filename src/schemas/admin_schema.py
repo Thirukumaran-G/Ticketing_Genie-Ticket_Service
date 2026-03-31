@@ -29,14 +29,6 @@ class EmailConfigResponse(BaseModel):
     is_active:  bool
 
 
-# ── SLA Rules ─────────────────────────────────────────────────────────────────
-
-class SLARuleCreateRequest(BaseModel):
-    tier_id:             uuid.UUID
-    priority:            str = Field(..., examples=["P0", "P1", "P2", "P3"])
-    response_time_min:   int = Field(..., gt=0)
-    resolution_time_min: int = Field(..., gt=0)
-
 
 class SLARuleResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -49,13 +41,6 @@ class SLARuleResponse(BaseModel):
     is_active:           bool
 
 
-# ── Severity / Priority Map ───────────────────────────────────────────────────
-
-class SeverityPriorityMapCreateRequest(BaseModel):
-    severity:         str       = Field(..., examples=["critical", "high", "medium", "low"])
-    tier_id:          uuid.UUID
-    derived_priority: str       = Field(..., examples=["P0", "P1", "P2", "P3"])
-
 
 class SeverityPriorityMapResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -64,6 +49,7 @@ class SeverityPriorityMapResponse(BaseModel):
     severity:         str
     tier_id:          uuid.UUID
     derived_priority: str
+    is_active:        bool 
 
 
 # ── Keyword Rules ─────────────────────────────────────────────────────────────
@@ -171,3 +157,11 @@ class FirstResponseTimeResponse(BaseModel):
 
 class TicketsByProductResponse(BaseModel):
     tickets_by_product: list[dict]
+
+class SLARuleUpdateRequest(BaseModel):
+    response_time_min:   int = Field(..., gt=0)
+    resolution_time_min: int = Field(..., gt=0)
+
+
+class SeverityPriorityMapUpdateRequest(BaseModel):
+    derived_priority: str = Field(..., examples=["P0", "P1", "P2", "P3"])

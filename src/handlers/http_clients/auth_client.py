@@ -104,3 +104,17 @@ class AuthHttpClient:
         except Exception as exc:
             logger.error("auth_get_products_error", error=str(exc))
             return []
+    
+    async def get_subscribed_products_by_ids(self, product_ids: list[str]) -> list[dict]:
+        """GET /internal/products/by-ids"""
+        url = f"{self._base_url}/api/v1/auth/internal/products/by-ids"
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                resp = await client.post(url, json={"product_ids": product_ids})
+            if resp.status_code == 200:
+                return resp.json().get("products", [])
+            logger.warning("auth_get_products_by_ids_failed", status=resp.status_code)
+            return []
+        except Exception as exc:
+            logger.error("auth_get_products_by_ids_error", error=str(exc))
+            return []
