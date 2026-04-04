@@ -1,8 +1,3 @@
-"""
-Ticket schemas — customer creation + customer view + agent/TL views.
-src/schemas/ticket_schema.py
-"""
-
 from __future__ import annotations
 
 import uuid
@@ -193,3 +188,6 @@ class EnhanceRequest(BaseModel):
 class EnhanceResponse(BaseModel):
     enhanced_text:   str
     changes_summary: str
+
+class ChildReplyRequest(BaseModel):
+    message: str

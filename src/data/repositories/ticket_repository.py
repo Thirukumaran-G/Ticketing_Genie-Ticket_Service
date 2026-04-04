@@ -70,24 +70,21 @@ class TicketRepository:
     # ── Agent queue ───────────────────────────────────────────────────────────
 
     async def get_agent_queue(
-        self,
-        agent_id: str,
-        statuses: list[str] | None = None,
-        limit: int = 50,
-    ) -> list[Ticket]:
+    self,
+    agent_id: str,
+    statuses: list[str] | None = None,
+    limit: int = 50,
+) -> list[Ticket]:
         statuses = statuses or [
-            "assigned",
-            "in_progress",
-            "on_hold",
-            "reopened",
-            "resolved",
-            "closed"
+            "assigned", "in_progress", "on_hold",
+            "reopened", "resolved", "closed"
         ]
         r = await self._s.execute(
             select(Ticket)
             .where(
                 Ticket.assigned_to == uuid.UUID(agent_id),
                 Ticket.status.in_(statuses),
+                Ticket.parent_ticket_id.is_(None),  # ← exclude children
             )
             .order_by(Ticket.priority.asc(), Ticket.created_at.asc())
             .limit(limit)

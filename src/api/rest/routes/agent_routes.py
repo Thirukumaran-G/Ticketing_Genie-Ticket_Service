@@ -19,10 +19,18 @@ from src.schemas.ticket_schema import (
     BreachJustificationRequest,
     BreachJustificationResponse,
     EnhanceRequest,
-    EnhanceResponse
+    EnhanceResponse,
+    ChildReplyRequest
 )
 from fastapi.responses import Response
 from src.control.agents.enhance_agent import EnhanceAgent
+from src.core.services.ticket_group_service import TicketGroupService
+
+def _group_svc_agent(
+    background_tasks: BackgroundTasks,
+    session: AsyncSession = Depends(get_db_session),
+) -> TicketGroupService:
+    return TicketGroupService(session, background_tasks)
 
 router = APIRouter(tags=["Agent — Queue"])
 
@@ -244,3 +252,74 @@ async def enhance_reply(
         enhanced_text=result.enhanced_text,
         changes_summary=result.changes_summary,
     )
+
+
+@router.get("/grouped-tickets")
+async def get_agent_grouped_tickets(
+    actor:   CurrentActor = _AgentActor,  # your agent dependency
+    session: AsyncSession = Depends(get_db_session),
+) -> list[dict]:
+    from sqlalchemy import select
+    from src.data.models.postgres.models import Ticket, SimilarTicketGroup
+    from src.data.repositories.ticket_group_repository import TicketGroupRepository
+
+    repo = TicketGroupRepository(session)
+
+    # Get all parent tickets assigned to this agent
+    r = await session.execute(
+        select(Ticket).where(
+            Ticket.assigned_to == uuid.UUID(actor.actor_id),
+            Ticket.is_parent.is_(True),
+        )
+    )
+    parent_tickets = list(r.scalars().all())
+
+    result = []
+    for pt in parent_tickets:
+        children = await repo.get_children_of_parent(str(pt.id))
+        result.append({
+            "ticket_id":       str(pt.id),
+            "ticket_number":   pt.ticket_number,
+            "title":           pt.title,
+            "status":          pt.status,
+            "priority":        pt.priority,
+            "severity":        pt.severity,
+            "child_count":     len(children),
+            "created_at":      pt.created_at,
+            "sla_resolve_due": pt.sla_resolve_due,
+        })
+    return result
+
+
+@router.get("/grouped-tickets/{ticket_id}/children")
+async def get_grouped_ticket_children(
+    ticket_id: str,
+    actor:     CurrentActor       = _AgentActor,
+    service:   TicketGroupService = Depends(_group_svc_agent),
+) -> list[dict]:
+    try:
+        return await service.get_grouped_ticket_children_with_conversations(
+            parent_ticket_id=ticket_id,
+            agent_id=actor.actor_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+
+@router.post("/grouped-tickets/{ticket_id}/reply/{child_ticket_id}")
+async def reply_to_child_ticket(
+    ticket_id:       str,
+    child_ticket_id: str,
+    payload:         ChildReplyRequest,
+    actor:           CurrentActor       = _AgentActor,
+    service:         TicketGroupService = Depends(_group_svc_agent),
+) -> dict:
+    try:
+        return await service.reply_to_child(
+            parent_ticket_id=ticket_id,
+            child_ticket_id=child_ticket_id,
+            agent_id=actor.actor_id,
+            message=payload.message,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))

@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.data.models.postgres.models import Team, TeamMember, Ticket
 
 
+
 # Active (non-terminal) ticket statuses
 _ACTIVE_STATUSES = ["new", "acknowledged", "assigned", "in_progress", "on_hold", "reopened"]
 

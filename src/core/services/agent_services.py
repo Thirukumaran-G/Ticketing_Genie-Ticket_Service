@@ -129,19 +129,29 @@ class AgentService:
         elif new_status == "in_progress" and current == "on_hold":
             fields = self._resume_from_hold(ticket, now, fields)
 
-        elif new_status == "resolved":
-            fields["resolved_at"] = now
-            fields["resolved_by"] = agent_id
-            if current == "on_hold" and ticket.on_hold_started_at:
-                held_mins = int((now - ticket.on_hold_started_at).total_seconds() / 60)
-                fields["on_hold_duration_accumulated"] = (
-                    (ticket.on_hold_duration_accumulated or 0) + held_mins
+        if new_status == "resolved" and getattr(ticket, "is_parent", False):
+            try:
+                from src.core.services.ticket_group_service import TicketGroupService
+                group_svc = TicketGroupService(self._session, self._background_tasks)
+                cascade_result = await group_svc.cascade_resolve(
+                    parent_ticket_id=ticket_id,
+                    resolution_message=(
+                        reason or "The issue has been identified and resolved by our support team."
+                    ),
+                    resolver_id=agent_id,
+                    resolver_type="agent",
                 )
-                fields["on_hold_started_at"] = None
-
-        await self._repo.update_fields(ticket_id, fields)
-        await self._session.commit()
-        ticket = await self._repo.get_by_id(ticket_id)
+                logger.info(
+                    "cascade_resolve_triggered",
+                    ticket_id=ticket_id,
+                    resolved_count=cascade_result.get("resolved", 0),
+                )
+            except Exception as exc:
+                logger.error(
+                    "cascade_resolve_failed",
+                    ticket_id=ticket_id,
+                    error=str(exc),
+                )
 
         logger.info(
             "ticket_status_updated",

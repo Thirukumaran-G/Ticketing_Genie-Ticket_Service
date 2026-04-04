@@ -1,8 +1,3 @@
-"""
-TeamRepository and TeamMemberRepository.
-Add to src/data/repositories/team_repository.py
-"""
-
 from __future__ import annotations
 
 import uuid

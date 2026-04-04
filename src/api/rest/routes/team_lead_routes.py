@@ -25,8 +25,14 @@ from src.schemas.team_lead_schema import (
     TLTicketDetailResponse,
     TLTicketThreadResponse,
     TLInternalNoteRequest,
+    SetParentRequest,
+    AssignParentRequest,
+    BroadcastRequest,
+    GroupResolveRequest
 )
 from src.schemas.ticket_schema import TicketQueueItem, BreachJustificationResponse
+from src.core.services.ticket_group_service import TicketGroupService
+
 
 router = APIRouter(prefix="/teamlead", tags=["Team Lead"])
 
@@ -38,6 +44,12 @@ def _tl_svc(
     session: AsyncSession = Depends(get_db_session),
 ) -> TeamLeadService:
     return TeamLeadService(session, background_tasks)
+
+def _group_svc(
+    background_tasks: BackgroundTasks,
+    session: AsyncSession = Depends(get_db_session),
+) -> TicketGroupService:
+    return TicketGroupService(session, background_tasks)
 
 
 # ── Unassigned queue ──────────────────────────────────────────────────────────
@@ -435,3 +447,141 @@ async def update_agent_skill(
         )
     except Exception as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.get("/groups")
+async def list_groups(
+    actor:   CurrentActor       = _TLActor,
+    service: TicketGroupService = Depends(_group_svc),
+) -> list[dict]:
+    groups = await service._repo.list_all_groups()
+    result = []
+    for g in groups:
+        members = []
+        for m in g.members:
+            ticket = await service._ticket_repo.get_by_id(str(m.ticket_id))
+            if ticket:
+                members.append({
+                    "ticket_id":        str(ticket.id),
+                    "ticket_number":    ticket.ticket_number,
+                    "title":            ticket.title,
+                    "status":           ticket.status,
+                    "priority":         ticket.priority,
+                    "severity":         ticket.severity,
+                    "similarity_score": m.similarity_score,
+                    "added_at":         m.added_at,
+                    "is_parent":        ticket.is_parent,
+                })
+        result.append({
+            "id":                str(g.id),
+            "name":              g.name,
+            "confirmed_by_lead": g.confirmed_by_lead,
+            "confirmed_at":      g.confirmed_at,
+            "parent_ticket_id":  str(g.parent_ticket_id) if g.parent_ticket_id else None,
+            "member_count":      len(members),
+            "members":           members,
+            "created_at":        g.created_at,
+            "updated_at":        g.updated_at,
+        })
+    return result
+
+
+@router.post("/groups/{group_id}/confirm")
+async def confirm_group(
+    group_id: str,
+    payload:  dict,
+    actor:    CurrentActor       = _TLActor,
+    service:  TicketGroupService = Depends(_group_svc),
+) -> dict:
+    name = payload.get("name")
+    try:
+        return await service.confirm_group(group_id, name, actor.actor_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.post("/groups/{group_id}/set-parent")
+async def set_group_parent(
+    group_id: str,
+    payload:  SetParentRequest,
+    actor:    CurrentActor       = _TLActor,
+    service:  TicketGroupService = Depends(_group_svc),
+) -> dict:
+    try:
+        return await service.set_parent(
+            group_id=group_id,
+            parent_ticket_id=payload.parent_ticket_id,
+            lead_id=actor.actor_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.post("/groups/{group_id}/assign-parent")
+async def assign_group_parent(
+    group_id: str,
+    payload:  AssignParentRequest,
+    actor:    CurrentActor       = _TLActor,
+    service:  TicketGroupService = Depends(_group_svc),
+) -> dict:
+    try:
+        return await service.assign_parent(
+            group_id=group_id,
+            agent_id=payload.agent_id,
+            note=payload.note,
+            lead_id=actor.actor_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.post("/groups/{group_id}/broadcast")
+async def broadcast_to_group(
+    group_id: str,
+    payload:  BroadcastRequest,
+    actor:    CurrentActor       = _TLActor,
+    service:  TicketGroupService = Depends(_group_svc),
+) -> dict:
+    try:
+        return await service.broadcast_to_group(
+            group_id=group_id,
+            message=payload.message,
+            lead_id=actor.actor_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.post("/groups/{group_id}/resolve")
+async def resolve_group(
+    group_id: str,
+    payload:  GroupResolveRequest,
+    actor:    CurrentActor       = _TLActor,
+    service:  TicketGroupService = Depends(_group_svc),
+) -> dict:
+    group = await service._repo.get_group_with_members(group_id)
+    if not group or not group.parent_ticket_id:
+        raise HTTPException(status_code=422, detail="Group has no parent ticket set.")
+    try:
+        return await service.cascade_resolve(
+            parent_ticket_id=str(group.parent_ticket_id),
+            resolution_message=payload.resolution_message,
+            resolver_id=actor.actor_id,
+            resolver_type="team_lead",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.delete("/groups/{group_id}/members/{ticket_id}")
+async def remove_group_member(
+    group_id:  str,
+    ticket_id: str,
+    actor:     CurrentActor       = _TLActor,
+    service:   TicketGroupService = Depends(_group_svc),
+) -> dict:
+    removed = await service._repo.remove_member(group_id, ticket_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail="Member not found.")
+    await service._session.commit()
+    return {"removed": True}

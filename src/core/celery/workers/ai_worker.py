@@ -1,4 +1,4 @@
-# ai_worker.py
+# ai_worker.py — FULL FILE
 from __future__ import annotations
 
 import os
@@ -18,13 +18,11 @@ logger = get_logger(__name__)
 ASSIGN_THRESHOLD = 0.45
 _embedding_model = None
 
-# ── IST timezone helper ───────────────────────────────────────────────────────
 _IST = timezone(timedelta(hours=5, minutes=30))
-
 CUSTOMER_SUPPORT_TEAM_NAME = "Customer Support Team"
 
+
 def _fmt_dt(dt) -> str:
-    """Format a UTC datetime as IST (UTC+5:30) for display in notifications."""
     if dt is None:
         return "N/A"
     return dt.astimezone(_IST).strftime("%d %b %Y, %I:%M %p IST")
@@ -37,6 +35,24 @@ def _get_embedding_model():
         _embedding_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
         logger.info("embedding_model_loaded")
     return _embedding_model
+
+
+def _compute_embedding_from_text(title: str, description: str) -> list[float] | None:
+    """
+    Compute embedding from ticket text.
+    This is the ONE place embeddings are generated.
+    Called from run_ai_classification and saved immediately.
+    Also called from run_auto_assign for scoring (reads from DB first).
+    """
+    try:
+        text = f"{title} {description}".strip()
+        if not text:
+            return None
+        model = _get_embedding_model()
+        return model.encode(text, normalize_embeddings=True).tolist()
+    except Exception as exc:
+        logger.warning("embedding_compute_failed", error=str(exc))
+        return None
 
 
 # ── AI Classification ─────────────────────────────────────────────────────────
@@ -110,6 +126,20 @@ def run_ai_classification(self, ticket_id: str, customer_email: str | None = Non
                 and system_severity != ticket.customer_priority
             )
 
+            # ── Compute and save embedding here ──────────────────────────
+            # This is the authoritative place embeddings are generated.
+            # run_find_similar reads this value 30 seconds later.
+            # run_auto_assign also reads this instead of recomputing.
+            embedding = _compute_embedding_from_text(
+                title=ticket.title or "",
+                description=ticket.description or "",
+            )
+            if embedding:
+                logger.info("ticket_embedding_computed", ticket_id=ticket_id)
+            else:
+                logger.warning("ticket_embedding_failed", ticket_id=ticket_id)
+            # ─────────────────────────────────────────────────────────────
+
             fields_to_update = {
                 "severity":            system_severity,
                 "priority":            system_priority,
@@ -118,6 +148,7 @@ def run_ai_classification(self, ticket_id: str, customer_email: str | None = Non
                 "sla_response_due":    sla_response_due,
                 "sla_resolve_due":     sla_resolve_due,
                 "status":              "acknowledged",
+                "ticket_embedding":    embedding,  # ← saved here
             }
 
             await repo.update_fields(ticket_id, fields_to_update)
@@ -128,6 +159,7 @@ def run_ai_classification(self, ticket_id: str, customer_email: str | None = Non
                 system_severity=system_severity,
                 system_priority=system_priority,
                 priority_overridden=priority_overridden,
+                embedding_saved=embedding is not None,
             )
 
             try:
@@ -143,6 +175,7 @@ def run_ai_classification(self, ticket_id: str, customer_email: str | None = Non
                         "priority_overridden": priority_overridden,
                         "sla_response_due":    sla_response_due.isoformat() if sla_response_due else None,
                         "sla_resolve_due":     sla_resolve_due.isoformat() if sla_resolve_due else None,
+                        "embedding_saved":     embedding is not None,
                     },
                     ticket_id=ticket.id,
                 )
@@ -157,7 +190,6 @@ def run_ai_classification(self, ticket_id: str, customer_email: str | None = Non
             sla_resolve_str = _fmt_dt(sla_resolve_due)
             tier            = ticket.tier_snapshot or "N/A"
 
-            # ── Ticket raised — ALWAYS both in_app + email ──────────────────
             try:
                 resolved_email = customer_email or await _safe_fetch_email(ticket.customer_id)
 
@@ -184,11 +216,6 @@ def run_ai_classification(self, ticket_id: str, customer_email: str | None = Non
                             f"— Ticketing Genie Support Team"
                         ),
                         recipient_email=resolved_email,
-                    )
-                    logger.info(
-                        "ticket_raised_email_sent",
-                        ticket_number=ticket.ticket_number,
-                        customer_email=resolved_email,
                     )
 
                 notif_repo = NotificationRepository(session)
@@ -232,11 +259,6 @@ def run_ai_classification(self, ticket_id: str, customer_email: str | None = Non
                         "is_internal":   False,
                     },
                 )
-                logger.info(
-                    "ticket_raised_in_app_sent",
-                    ticket_id=ticket_id,
-                    recipient_id=str(ticket.customer_id),
-                )
 
             except Exception as exc:
                 logger.warning("ticket_raised_notification_failed", error=str(exc))
@@ -251,13 +273,21 @@ def run_ai_classification(self, ticket_id: str, customer_email: str | None = Non
                     str(ticket.customer_id),
                 )
 
+        # Fire downstream tasks
+        # auto_assign and draft fire immediately
+        # find_similar fires after 30s — embedding is guaranteed saved by then
         run_auto_assign.delay(ticket_id, customer_email=customer_email)
         run_ai_draft.delay(ticket_id)
+        run_find_similar.apply_async(
+            args=[ticket_id],
+            countdown=30,
+        )
 
         return {
-            "severity":   system_severity,
-            "priority":   system_priority,
-            "overridden": priority_overridden,
+            "severity":        system_severity,
+            "priority":        system_priority,
+            "overridden":      priority_overridden,
+            "embedding_saved": embedding is not None,
         }
 
     try:
@@ -349,16 +379,13 @@ async def _do_assign(
             logger.warning("auto_assign_no_teams_for_product", product_id=str(ticket.product_id))
             return {"error": "No teams for product"}
 
-        # ── LLM team selection with fallback ──────────────────────────────
         selected_team, llm_failed = await _llm_pick_team(ticket=ticket, teams=teams)
 
         if llm_failed:
-            # ── Route to Customer Support Team, notify their TL, stop here ──
             logger.warning(
                 "auto_assign_llm_failed_routing_to_customer_support",
                 ticket_id=ticket_id,
             )
-
             await ticket_repo.update_fields(ticket_id, {
                 "team_id":     selected_team.id,
                 "assigned_to": None,
@@ -381,7 +408,6 @@ async def _do_assign(
             except Exception as exc:
                 logger.warning("audit_llm_fallback_failed", ticket_id=ticket_id, error=str(exc))
 
-            # Notify Customer Support Team lead
             if selected_team.team_lead_id:
                 notify_recipient.apply_async(
                     kwargs=dict(
@@ -439,7 +465,6 @@ async def _do_assign(
                 "reason":      "llm_unavailable_routed_to_customer_support",
             }
 
-        # ── Normal flow: LLM succeeded, proceed with member scoring ───────
         members_result = await session.execute(
             select(TeamMember).where(
                 TeamMember.team_id == selected_team.id,
@@ -461,8 +486,23 @@ async def _do_assign(
             await session.commit()
             return {"routed": True, "reason": "no_members_in_team", "team_id": str(selected_team.id)}
 
-        ticket_embedding = _compute_ticket_embedding(ticket)
-        workload_map     = await _get_workload_map(session, members)
+        # ── Read embedding from DB (saved by run_ai_classification) ──────
+        # Only recompute if somehow missing — this should not happen
+        # in normal flow since classification runs first
+        if ticket.ticket_embedding is not None:
+            ticket_embedding = list(ticket.ticket_embedding)
+            logger.info("auto_assign_using_saved_embedding", ticket_id=ticket_id)
+        else:
+            logger.warning(
+                "auto_assign_embedding_missing_recomputing",
+                ticket_id=ticket_id,
+            )
+            ticket_embedding = _compute_embedding_from_text(
+                title=ticket.title or "",
+                description=ticket.description or "",
+            )
+
+        workload_map = await _get_workload_map(session, members)
 
         scored = sorted(
             [
@@ -526,7 +566,6 @@ async def _do_assign(
             sla_resolve_str = _fmt_dt(ticket.sla_resolve_due)
             tier            = ticket.tier_snapshot or "N/A"
 
-            # ── Agent notification ─────────────────────────────────────────
             notify_recipient.apply_async(
                 kwargs=dict(
                     recipient_id=str(best_member.user_id),
@@ -569,7 +608,6 @@ async def _do_assign(
                 countdown=2,
             )
 
-            # ── Customer notification ──────────────────────────────────────
             notify_recipient.apply_async(
                 kwargs=dict(
                     recipient_id=str(ticket.customer_id),
@@ -613,7 +651,6 @@ async def _do_assign(
                 countdown=2,
             )
 
-            # ── TL alert for critical tickets ──────────────────────────────
             if ticket.priority in ("P0", "critical") and selected_team.team_lead_id:
                 notify_recipient.apply_async(
                     kwargs=dict(
@@ -736,8 +773,8 @@ def run_ai_draft(self, ticket_id: str) -> dict:
             if not ticket:
                 return {"error": "Not found"}
 
-            agent      = DraftAgent()
-            result     = agent.generate_draft(
+            agent  = DraftAgent()
+            result = agent.generate_draft(
                 ticket_title=ticket.title or "",
                 ticket_description=ticket.description or "",
             )
@@ -766,6 +803,51 @@ def run_ai_draft(self, ticket_id: str) -> dict:
     except Exception as exc:
         logger.error("ai_draft_error", ticket_id=ticket_id, error=str(exc))
         raise self.retry(exc=exc, countdown=20)
+
+
+# ── Find Similar Tickets ──────────────────────────────────────────────────────
+
+@celery_app.task(name="ticket.ai.find_similar", bind=True, max_retries=2)
+def run_find_similar(self, ticket_id: str) -> dict:
+
+    async def _run() -> dict:
+        from src.data.clients.postgres_client import CelerySessionFactory
+        from src.data.repositories.ticket_repository import TicketRepository
+        from src.core.services.ticket_group_service import TicketGroupService
+
+        async with CelerySessionFactory() as session:
+            repo   = TicketRepository(session)
+            ticket = await repo.get_by_id(ticket_id)
+
+            if not ticket:
+                return {"error": "Ticket not found"}
+
+            if not ticket.ticket_embedding:
+                logger.warning("find_similar_no_embedding", ticket_id=ticket_id)
+                return {"skipped": True, "reason": "no_embedding"}
+
+            if not ticket.team_id:
+                logger.warning("find_similar_no_team", ticket_id=ticket_id)
+                return {"skipped": True, "reason": "no_team"}
+
+            if ticket.parent_ticket_id:
+                return {"skipped": True, "reason": "already_a_child"}
+
+            svc    = TicketGroupService(session)
+            result = await svc.find_and_group_similar(
+                ticket_id=ticket_id,
+                embedding=list(ticket.ticket_embedding),
+                team_id=str(ticket.team_id),
+            )
+
+        logger.info("find_similar_complete", ticket_id=ticket_id, result=result)
+        return result
+
+    try:
+        return run_async(_run())
+    except Exception as exc:
+        logger.error("find_similar_error", ticket_id=ticket_id, error=str(exc))
+        raise self.retry(exc=exc, countdown=30)
 
 
 # ── Priority Override Notification ────────────────────────────────────────────
@@ -826,12 +908,6 @@ def run_ai_priority_override(
                 countdown=2,
             )
 
-            logger.info(
-                "priority_override_notif_queued",
-                ticket_id=ticket_id,
-                recipient_id=str(ticket.customer_id),
-            )
-
     try:
         run_async(_notify())
     except Exception as exc:
@@ -855,23 +931,16 @@ def _abstract_priority_reason(original_severity: str, new_priority: str, reason:
 # ── Team routing ──────────────────────────────────────────────────────────────
 
 async def _llm_pick_team(ticket, teams: list) -> tuple[object, bool]:
-    """
-    Returns (selected_team, llm_failed).
-    llm_failed=True means LLM was unavailable; selected_team will be the
-    Customer Support Team (or teams[0] as last resort).
-    llm_failed=False means LLM succeeded and selected_team is the LLM's choice.
-    """
     from src.control.agents.routing_agent import TeamRoutingAgent
 
     def _find_customer_support_team(teams: list):
         for t in teams:
             if t.name == CUSTOMER_SUPPORT_TEAM_NAME:
                 return t
-        # last resort: first team in list
         return teams[0]
 
     team_names = [t.name for t in teams]
-    agent = TeamRoutingAgent()
+    agent      = TeamRoutingAgent()
 
     try:
         result = await agent.route(
@@ -886,30 +955,15 @@ async def _llm_pick_team(ticket, teams: list) -> tuple[object, bool]:
             error=str(exc),
         )
         fallback = _find_customer_support_team(teams)
-        logger.warning(
-            "auto_assign_llm_fallback_team",
-            ticket_id=str(ticket.id),
-            team=fallback.name,
-        )
         return fallback, True
 
-    # Check if the returned team name matched any real team
     for team in teams:
         if team.name == result.team_name:
-            logger.info("auto_assign_team_selected", team=team.name, ticket_id=str(ticket.id))
             return team, False
     for team in teams:
         if team.name.lower() == result.team_name.lower():
-            logger.info("auto_assign_team_selected_ci", team=team.name, ticket_id=str(ticket.id))
             return team, False
 
-    # LLM returned a team name that doesn't match — treat as LLM failure
-    logger.warning(
-        "auto_assign_team_not_matched_fallback",
-        returned=result.team_name,
-        available=team_names,
-        ticket_id=str(ticket.id),
-    )
     fallback = _find_customer_support_team(teams)
     return fallback, True
 
@@ -917,18 +971,17 @@ async def _llm_pick_team(ticket, teams: list) -> tuple[object, bool]:
 # ── Embedding helpers ─────────────────────────────────────────────────────────
 
 def _compute_ticket_embedding(ticket) -> list[float] | None:
+    """
+    Used by auto_assign for member scoring.
+    Reads from DB first — only recomputes if missing.
+    """
     if ticket.ticket_embedding is not None:
         emb = ticket.ticket_embedding
         return list(emb) if not isinstance(emb, list) else emb
-    try:
-        model = _get_embedding_model()
-        text  = f"{ticket.title or ''} {ticket.description or ''}".strip()
-        if not text:
-            return None
-        return model.encode(text, normalize_embeddings=True).tolist()
-    except Exception as exc:
-        logger.warning("ticket_embedding_compute_failed", error=str(exc))
-        return None
+    return _compute_embedding_from_text(
+        title=ticket.title or "",
+        description=ticket.description or "",
+    )
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:

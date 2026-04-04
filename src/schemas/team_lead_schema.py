@@ -269,3 +269,16 @@ class RerouteTicketRequest(BaseModel):
 
 class UpdateAgentSkillRequest(BaseModel):
     skill_text: str
+
+class SetParentRequest(BaseModel):
+    parent_ticket_id: str
+
+class AssignParentRequest(BaseModel):
+    agent_id: str
+    note: str
+
+class BroadcastRequest(BaseModel):
+    message: str
+
+class GroupResolveRequest(BaseModel):
+    resolution_message: str

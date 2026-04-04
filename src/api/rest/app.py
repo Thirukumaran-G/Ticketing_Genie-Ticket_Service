@@ -42,11 +42,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("database_tables_created")
 
     async for session in get_db_session():
-        await seed_keyword_rules()
-        await seed_pri_sev_map()
-        await seed_sla_rules()
-        await seed_teams()
-        await seed()
+        # await seed_keyword_rules()
+        # await seed_pri_sev_map()
+        # await seed_sla_rules()
+        # await seed_teams()
+        # await seed()
         logger.info("keyword_rules_seeded")
         logger.info("priority_severity_map_seeded")
         logger.info("sla_rules_seeded")
